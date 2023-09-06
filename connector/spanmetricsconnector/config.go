@@ -58,6 +58,9 @@ type Config struct {
 
 	// Exemplars defines the configuration for exemplars.
 	Exemplars ExemplarsConfig `mapstructure:"exemplars"`
+
+	ExcludeExternalDuration  bool     `mapstructure:"excludeExternalDuration"`
+	ExternallyFacingServices []string `mapstructure:"externallyFacingServices"`
 }
 
 type HistogramConfig struct {

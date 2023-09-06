@@ -71,6 +71,8 @@ type span struct {
 	statusCode ptrace.StatusCode
 	traceID    [16]byte
 	spanID     [8]byte
+	startTime  time.Time
+	endTime    time.Time
 }
 
 // verifyDisabledHistogram expects that histograms are disabled.
@@ -121,6 +123,11 @@ func verifyExemplarsExist(t testing.TB, input pmetric.Metrics) bool {
 // verifyConsumeMetricsInputCumulative expects one accumulation of metrics, and marked as cumulative
 func verifyConsumeMetricsInputCumulative(t testing.TB, input pmetric.Metrics) bool {
 	return verifyConsumeMetricsInput(t, input, pmetric.AggregationTemporalityCumulative, 1)
+}
+
+// verifyConsumeMetricsInputCumulativeExcludingExternalDuration expects one accumulation of metrics, and marked as cumulative
+func verifyConsumeMetricsInputCumulativeExcludingExternalDuration(t testing.TB, input pmetric.Metrics, expectedDurations map[string]float64) bool {
+	return verifyConsumeMetricsInputExcludingExternalDuration(t, input, pmetric.AggregationTemporalityCumulative, 1, expectedDurations)
 }
 
 func verifyBadMetricsOkay(_ testing.TB, _ pmetric.Metrics) bool {
@@ -251,6 +258,116 @@ func verifyExplicitHistogramDataPoints(t testing.TB, dps pmetric.HistogramDataPo
 	}
 }
 
+// verifyConsumeMetricsInputExcludingExternalDuration verifies the input of the ConsumeMetrics call from this connector.
+// This is the best point to verify the computed metrics from spans are as expected.
+func verifyConsumeMetricsInputExcludingExternalDuration(t testing.TB, input pmetric.Metrics, expectedTemporality pmetric.AggregationTemporality, numCumulativeConsumptions int, expectedDurations map[string]float64) bool {
+	require.Equal(t, 8, input.DataPointCount(),
+		"Should be 4 for each of call count and latency split into two resource scopes defined by: "+
+			"service-a: service-a (server kind) -> service-a (client kind) and "+
+			"service-b: service-b (service kind) -> service-b (client kind) -> external",
+	)
+
+	require.Equal(t, 2, input.ResourceMetrics().Len())
+
+	for i := 0; i < input.ResourceMetrics().Len(); i++ {
+		rm := input.ResourceMetrics().At(i)
+
+		var numDataPoints int
+		val, ok := rm.Resource().Attributes().Get(serviceNameKey)
+		require.True(t, ok)
+		serviceName := val.AsString()
+		if serviceName == "service-a" {
+			numDataPoints = 2
+		} else if serviceName == "service-b" {
+			numDataPoints = 2
+		}
+
+		ilm := rm.ScopeMetrics()
+		require.Equal(t, 1, ilm.Len())
+		assert.Equal(t, "spanmetricsconnector", ilm.At(0).Scope().Name())
+
+		m := ilm.At(0).Metrics()
+		require.Equal(t, 2, m.Len(), "only sum and histogram metric types generated")
+
+		// validate calls - sum metrics
+		metric := m.At(0)
+		assert.Equal(t, metricNameCalls, metric.Name())
+		assert.Equal(t, expectedTemporality, metric.Sum().AggregationTemporality())
+		assert.True(t, metric.Sum().IsMonotonic())
+
+		seenMetricIDs := make(map[metricID]bool)
+		callsDps := metric.Sum().DataPoints()
+		require.Equal(t, numDataPoints, callsDps.Len())
+		for dpi := 0; dpi < numDataPoints; dpi++ {
+			dp := callsDps.At(dpi)
+			assert.Equal(t,
+				int64(numCumulativeConsumptions),
+				dp.IntValue(),
+				"There should only be one metric per Service/name/kind combination",
+			)
+			assert.NotZero(t, dp.StartTimestamp(), "StartTimestamp should be set")
+			assert.NotZero(t, dp.Timestamp(), "Timestamp should be set")
+			verifyMetricLabels(dp, t, seenMetricIDs)
+		}
+
+		// validate latency - histogram metrics
+		metric = m.At(1)
+		assert.Equal(t, metricNameDuration, metric.Name())
+		assert.Equal(t, defaultUnit.String(), metric.Unit())
+
+		hist := metric.Histogram()
+		assert.Equal(t, expectedTemporality, hist.AggregationTemporality())
+		verifyExplicitHistogramDataPointsExcludingExternalDuration(t, hist.DataPoints(), numDataPoints, numCumulativeConsumptions, expectedDurations)
+	}
+	return true
+}
+
+func verifyExplicitHistogramDataPointsExcludingExternalDuration(t testing.TB, dps pmetric.HistogramDataPointSlice, numDataPoints, numCumulativeConsumptions int, expectedDurations map[string]float64) {
+	seenMetricIDs := make(map[metricID]bool)
+	require.Equal(t, numDataPoints, dps.Len())
+	for dpi := 0; dpi < numDataPoints; dpi++ {
+		dp := dps.At(dpi)
+
+		serviceName, ok := dp.Attributes().Get(serviceNameKey)
+		require.True(t, ok)
+		spanKind, ok := dp.Attributes().Get(spanKindKey)
+		require.True(t, ok)
+		expectedDuration := expectedDurations[serviceName.AsString()+spanKind.AsString()]
+
+		assert.Equal(
+			t,
+			expectedDuration*float64(numCumulativeConsumptions),
+			dp.Sum(),
+			"Should be a "+fmt.Sprintf("%.2f", expectedDuration)+" duration measurement, multiplied by the number of stateful accumulations.")
+		assert.NotZero(t, dp.Timestamp(), "Timestamp should be set")
+
+		// Verify bucket counts.
+
+		// The bucket counts should be 1 greater than the explicit bounds as documented in:
+		// https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto.
+		assert.Equal(t, dp.ExplicitBounds().Len()+1, dp.BucketCounts().Len())
+
+		// Find the bucket index where the expectedDuration duration should belong in.
+		var foundDurationIndex int
+		for foundDurationIndex = 0; foundDurationIndex < dp.ExplicitBounds().Len(); foundDurationIndex++ {
+			if dp.ExplicitBounds().At(foundDurationIndex) >= expectedDuration {
+				break
+			}
+		}
+
+		// Then verify that all histogram buckets are empty except for the bucket with the expectedDuration duration.
+		var wantBucketCount uint64
+		for bi := 0; bi < dp.BucketCounts().Len(); bi++ {
+			wantBucketCount = 0
+			if bi == foundDurationIndex {
+				wantBucketCount = uint64(numCumulativeConsumptions)
+			}
+			assert.Equal(t, wantBucketCount, dp.BucketCounts().At(bi))
+		}
+		verifyMetricLabels(dp, t, seenMetricIDs)
+	}
+}
+
 func verifyExponentialHistogramDataPoints(t testing.TB, dps pmetric.ExponentialHistogramDataPointSlice, numDataPoints, numCumulativeConsumptions int) {
 	seenMetricIDs := make(map[metricID]bool)
 	require.Equal(t, numDataPoints, dps.Len())
@@ -363,6 +480,69 @@ func buildSampleTrace() ptrace.Traces {
 	return traces
 }
 
+// buildSampleTrace builds the following trace:
+//
+//	service-a/ping (server) -> internal, 10s in total, 6s excluding external 4s duration
+//	  service-a/ping (client) -> internal, 8s in total, 4s excluding external 4s duration
+//	    service-b/ping (server) -> internal, 6s in total, 2s excluding external 4s duration
+//	      service-b/ping (client) -> external, 4s in total
+func buildSampleTraceWithExternalCalls() ptrace.Traces {
+	traces := ptrace.NewTraces()
+
+	now := time.Now()
+
+	initServiceSpans(
+		serviceSpans{
+			serviceName: "service-a",
+			spans: []span{
+				{
+					name:       "/ping",
+					kind:       ptrace.SpanKindServer,
+					statusCode: ptrace.StatusCodeOk,
+					traceID:    [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10},
+					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+					startTime:  now,
+					endTime:    now.Add(time.Duration(10) * time.Second),
+				},
+				{
+					name:       "/ping",
+					kind:       ptrace.SpanKindClient,
+					statusCode: ptrace.StatusCodeOk,
+					traceID:    [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10},
+					spanID:     [8]byte{0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					startTime:  now.Add(time.Duration(1) * time.Second),
+					endTime:    now.Add(time.Duration(9) * time.Second),
+				},
+			},
+		}, traces.ResourceSpans().AppendEmpty())
+	initServiceSpans(
+		serviceSpans{
+			serviceName: "service-b",
+			spans: []span{
+				{
+					name:       "/ping",
+					kind:       ptrace.SpanKindServer,
+					statusCode: ptrace.StatusCodeError,
+					traceID:    [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+					startTime:  now.Add(time.Duration(2) * time.Second),
+					endTime:    now.Add(time.Duration(8) * time.Second),
+				},
+				{
+					name:       "/ping",
+					kind:       ptrace.SpanKindClient,
+					statusCode: ptrace.StatusCodeError,
+					traceID:    [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					startTime:  now.Add(time.Duration(3) * time.Second),
+					endTime:    now.Add(time.Duration(7) * time.Second),
+				},
+			},
+		}, traces.ResourceSpans().AppendEmpty())
+	initServiceSpans(serviceSpans{}, traces.ResourceSpans().AppendEmpty())
+	return traces
+}
+
 func initServiceSpans(serviceSpans serviceSpans, spans ptrace.ResourceSpans) {
 	if serviceSpans.serviceName != "" {
 		spans.Resource().Attributes().PutStr(conventions.AttributeServiceName, serviceSpans.serviceName)
@@ -380,10 +560,18 @@ func initSpan(span span, s ptrace.Span) {
 	s.SetName(span.name)
 	s.SetKind(span.kind)
 	s.Status().SetCode(span.statusCode)
+
 	now := time.Now()
-	s.SetStartTimestamp(pcommon.NewTimestampFromTime(now))
-	s.SetEndTimestamp(
-		pcommon.NewTimestampFromTime(now.Add(time.Duration(sampleDuration) * time.Millisecond)))
+	if span.startTime.IsZero() {
+		s.SetStartTimestamp(pcommon.NewTimestampFromTime(now))
+	} else {
+		s.SetStartTimestamp(pcommon.NewTimestampFromTime(span.startTime))
+	}
+	if span.endTime.IsZero() {
+		s.SetEndTimestamp(pcommon.NewTimestampFromTime(now.Add(time.Duration(sampleDuration) * time.Millisecond)))
+	} else {
+		s.SetEndTimestamp(pcommon.NewTimestampFromTime(span.endTime))
+	}
 
 	s.Attributes().PutStr(stringAttrName, "stringAttrValue")
 	s.Attributes().PutInt(intAttrName, 99)
@@ -581,7 +769,7 @@ func TestConcurrentShutdown(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Test
-	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker)
+	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, false)
 	err := p.Start(ctx, componenttest.NewNopHost())
 	require.NoError(t, err)
 
@@ -661,7 +849,7 @@ func TestConsumeMetricsErrors(t *testing.T) {
 	}
 	mockClock := clock.NewMock(time.Now())
 	ticker := mockClock.NewTicker(time.Nanosecond)
-	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker)
+	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, false)
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())
@@ -823,7 +1011,7 @@ func TestConsumeTraces(t *testing.T) {
 			mockClock := clock.NewMock(time.Now())
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
-			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker)
+			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, false)
 
 			ctx := metadata.NewIncomingContext(context.Background(), nil)
 			err := p.Start(ctx, componenttest.NewNopHost())
@@ -846,10 +1034,74 @@ func TestConsumeTraces(t *testing.T) {
 	}
 }
 
+func TestConsumeTracesExcludingExternalDuration(t *testing.T) {
+	t.Parallel()
+
+	testcases := []struct {
+		name                   string
+		aggregationTemporality string
+		histogramConfig        func() HistogramConfig
+		exemplarConfig         func() ExemplarsConfig
+		verifier               func(t testing.TB, input pmetric.Metrics, expectedDurations map[string]float64) bool
+		traces                 []ptrace.Traces
+		expectedDurations      map[string]float64
+	}{
+		// explicit buckets histogram
+		{
+			name:                   "Test single consumption, four spans (Cumulative).",
+			aggregationTemporality: cumulative,
+			histogramConfig:        explicitHistogramsConfig,
+			exemplarConfig:         disabledExemplarsConfig,
+			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalDuration,
+			traces:                 []ptrace.Traces{buildSampleTraceWithExternalCalls()},
+			expectedDurations: map[string]float64{
+				"service-aSPAN_KIND_SERVER": float64(6000),
+				"service-aSPAN_KIND_CLIENT": float64(4000),
+				"service-bSPAN_KIND_SERVER": float64(2000),
+				"service-bSPAN_KIND_CLIENT": float64(4000),
+			},
+		},
+	}
+
+	for _, tc := range testcases {
+		// Since parallelism is enabled in these tests, to avoid flaky behavior,
+		// instantiate a copy of the test case for t.Run's closure to use.
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Prepare
+
+			mcon := &consumertest.MetricsSink{}
+
+			mockClock := clock.NewMock(time.Now())
+			ticker := mockClock.NewTicker(time.Nanosecond)
+
+			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, true)
+
+			ctx := metadata.NewIncomingContext(context.Background(), nil)
+			err := p.Start(ctx, componenttest.NewNopHost())
+			defer func() { sdErr := p.Shutdown(ctx); require.NoError(t, sdErr) }()
+			require.NoError(t, err)
+
+			for _, traces := range tc.traces {
+				// Test
+				err = p.ConsumeTraces(ctx, traces)
+				assert.NoError(t, err)
+
+				// Trigger flush.
+				mockClock.Add(time.Nanosecond)
+				require.Eventually(t, func() bool {
+					return len(mcon.AllMetrics()) > 0
+				}, 1*time.Second, 10*time.Millisecond)
+				tc.verifier(t, mcon.AllMetrics()[len(mcon.AllMetrics())-1], tc.expectedDurations)
+			}
+		})
+	}
+}
+
 func TestMetricKeyCache(t *testing.T) {
 	mcon := consumertest.NewNop()
 
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil)
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, false)
 	traces := buildSampleTrace()
 
 	// Test
@@ -880,7 +1132,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 	// Prepare
 	mcon := consumertest.NewNop()
 
-	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil)
+	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil, false)
 
 	traces := buildSampleTrace()
 
@@ -894,7 +1146,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 	mcon := consumertest.NewNop()
 	excludeDimensions := []string{"span.kind", "span.name", "totallyWrongNameDoesNotAffectAnything"}
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, excludeDimensions...)
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, false, excludeDimensions...)
 	traces := buildSampleTrace()
 
 	// Test
@@ -943,8 +1195,7 @@ func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 
 }
 
-func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, excludedDimensions ...string) *connectorImp {
-
+func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, excludeExternalDuration bool, excludedDimensions ...string) *connectorImp {
 	cfg := &Config{
 		AggregationTemporality: temporality,
 		Histogram:              histogramConfig(),
@@ -966,6 +1217,10 @@ func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *stri
 			{notInSpanAttrName1, nil},
 			// Add a resource attribute to test "process" attributes like IP, host, region, cluster, etc.
 			{regionResourceAttrName, nil},
+		},
+		ExcludeExternalDuration: excludeExternalDuration,
+		ExternallyFacingServices: []string{
+			"service-b",
 		},
 	}
 	c, err := newConnector(logger, cfg, ticker)
@@ -1061,7 +1316,7 @@ func TestConnectorConsumeTracesEvictedCacheKey(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Note: default dimension key cache size is 2.
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker)
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker, false)
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())

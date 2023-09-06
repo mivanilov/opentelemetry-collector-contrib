@@ -204,7 +204,11 @@ func (p *connectorImp) Capabilities() consumer.Capabilities {
 // It aggregates the trace data to generate metrics.
 func (p *connectorImp) ConsumeTraces(_ context.Context, traces ptrace.Traces) error {
 	p.lock.Lock()
-	p.aggregateMetrics(traces)
+	if p.config.ExcludeExternalDuration {
+		p.aggregateMetricsExcludingExternalDuration(traces)
+	} else {
+		p.aggregateMetrics(traces)
+	}
 	p.lock.Unlock()
 	return nil
 }
@@ -324,6 +328,103 @@ func (p *connectorImp) aggregateMetrics(traces ptrace.Traces) {
 			}
 		}
 	}
+}
+
+func (p *connectorImp) aggregateMetricsExcludingExternalDuration(traces ptrace.Traces) {
+	externalDuration := p.calcExternalDuration(traces)
+
+	for i := 0; i < traces.ResourceSpans().Len(); i++ {
+		rspans := traces.ResourceSpans().At(i)
+		resourceAttr := rspans.Resource().Attributes()
+		serviceAttr, ok := resourceAttr.Get(conventions.AttributeServiceName)
+		if !ok {
+			continue
+		}
+
+		rm := p.getOrCreateResourceMetrics(resourceAttr)
+		sums := rm.sums
+		histograms := rm.histograms
+
+		unitDivider := unitDivider(p.config.Histogram.Unit)
+		serviceName := serviceAttr.Str()
+		ilsSlice := rspans.ScopeSpans()
+		for j := 0; j < ilsSlice.Len(); j++ {
+			ils := ilsSlice.At(j)
+			spans := ils.Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				// Protect against end timestamps before start timestamps. Assume 0 duration.
+				duration := float64(0)
+				startTime := span.StartTimestamp()
+				endTime := span.EndTimestamp()
+				if endTime > startTime {
+					if span.Kind() == ptrace.SpanKindClient && contains(p.config.ExternallyFacingServices, serviceAttr.Str()) {
+						duration = float64(endTime-startTime) / float64(unitDivider)
+					} else {
+						duration = (float64(endTime-startTime) - externalDuration) / float64(unitDivider)
+					}
+				}
+				key := p.buildKey(serviceName, span, p.dimensions, resourceAttr)
+
+				attributes, ok := p.metricKeyToDimensions.Get(key)
+				if !ok {
+					attributes = p.buildAttributes(serviceName, span, resourceAttr)
+					p.metricKeyToDimensions.Add(key, attributes)
+				}
+				if !p.config.Histogram.Disable {
+					// aggregate histogram metrics
+					h := histograms.GetOrCreate(key, attributes)
+					p.addExemplar(span, duration, h)
+					h.Observe(duration)
+
+				}
+				// aggregate sums metrics
+				s := sums.GetOrCreate(key, attributes)
+				s.Add(1)
+			}
+		}
+	}
+}
+
+func (p *connectorImp) calcExternalDuration(traces ptrace.Traces) float64 {
+	var externalClientSpans []ptrace.Span
+	for i := 0; i < traces.ResourceSpans().Len(); i++ {
+		rspans := traces.ResourceSpans().At(i)
+		resourceAttr := rspans.Resource().Attributes()
+		serviceAttr, ok := resourceAttr.Get(conventions.AttributeServiceName)
+		if !ok || !contains(p.config.ExternallyFacingServices, serviceAttr.Str()) {
+			continue
+		}
+
+		ilsSlice := rspans.ScopeSpans()
+		for j := 0; j < ilsSlice.Len(); j++ {
+			ils := ilsSlice.At(j)
+			spans := ils.Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				if span.Kind() == ptrace.SpanKindClient {
+					externalClientSpans = append(externalClientSpans, span)
+				}
+			}
+		}
+	}
+
+	externalDuration := float64(0)
+	if len(externalClientSpans) != 0 {
+		earliestStartTime := externalClientSpans[0].StartTimestamp()
+		latestEndTime := externalClientSpans[0].EndTimestamp()
+		for _, span := range externalClientSpans {
+			if span.StartTimestamp().AsTime().Before(earliestStartTime.AsTime()) {
+				earliestStartTime = span.StartTimestamp()
+			}
+			if span.EndTimestamp().AsTime().After(latestEndTime.AsTime()) {
+				latestEndTime = span.EndTimestamp()
+			}
+		}
+		externalDuration = float64(latestEndTime - earliestStartTime)
+	}
+
+	return externalDuration
 }
 
 func (p *connectorImp) addExemplar(span ptrace.Span, duration float64, h metrics.Histogram) {
