@@ -79,6 +79,16 @@ type dimension struct {
 	value *pcommon.Value
 }
 
+type spansToProcessForExclusion struct {
+	externalClientSpans []ptrace.Span
+	clientServerSpans   map[pcommon.SpanID]ptrace.Span
+}
+
+type spansWithExclusions struct {
+	spansToIgnoreOnError   map[pcommon.SpanID]struct{}
+	spansDurationToExclude map[pcommon.SpanID]float64
+}
+
 func newDimensions(cfgDims []Dimension) []dimension {
 	if len(cfgDims) == 0 {
 		return nil
@@ -204,8 +214,8 @@ func (p *connectorImp) Capabilities() consumer.Capabilities {
 // It aggregates the trace data to generate metrics.
 func (p *connectorImp) ConsumeTraces(_ context.Context, traces ptrace.Traces) error {
 	p.lock.Lock()
-	if p.config.ExcludeExternalDuration {
-		p.aggregateMetricsExcludingExternalDuration(traces)
+	if len(p.config.ExcludeExternalStatsProducedByServices) != 0 {
+		p.aggregateMetricsExcludingExternalStats(traces)
 	} else {
 		p.aggregateMetrics(traces)
 	}
@@ -330,8 +340,8 @@ func (p *connectorImp) aggregateMetrics(traces ptrace.Traces) {
 	}
 }
 
-func (p *connectorImp) aggregateMetricsExcludingExternalDuration(traces ptrace.Traces) {
-	externalDuration := p.calcExternalDuration(traces)
+func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Traces) {
+	spansWithExclusions := p.getSpansWithExclusions(p.getSpansToProcessForExclusion(traces))
 
 	for i := 0; i < traces.ResourceSpans().Len(); i++ {
 		rspans := traces.ResourceSpans().At(i)
@@ -353,16 +363,19 @@ func (p *connectorImp) aggregateMetricsExcludingExternalDuration(traces ptrace.T
 			spans := ils.Spans()
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
+				if _, exists := spansWithExclusions.spansToIgnoreOnError[span.SpanID()]; exists {
+					continue
+				}
 				// Protect against end timestamps before start timestamps. Assume 0 duration.
 				duration := float64(0)
 				startTime := span.StartTimestamp()
 				endTime := span.EndTimestamp()
 				if endTime > startTime {
-					if span.Kind() == ptrace.SpanKindClient && contains(p.config.ExternallyFacingServices, serviceAttr.Str()) {
-						duration = float64(endTime-startTime) / float64(unitDivider)
-					} else {
-						duration = (float64(endTime-startTime) - externalDuration) / float64(unitDivider)
+					externalDuration, exists := spansWithExclusions.spansDurationToExclude[span.SpanID()]
+					if !exists {
+						externalDuration = float64(0)
 					}
+					duration = (float64(endTime-startTime) - externalDuration) / float64(unitDivider)
 				}
 				key := p.buildKey(serviceName, span, p.dimensions, resourceAttr)
 
@@ -386,15 +399,13 @@ func (p *connectorImp) aggregateMetricsExcludingExternalDuration(traces ptrace.T
 	}
 }
 
-func (p *connectorImp) calcExternalDuration(traces ptrace.Traces) float64 {
+func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *spansToProcessForExclusion {
 	var externalClientSpans []ptrace.Span
+	var clientServerSpans = make(map[pcommon.SpanID]ptrace.Span)
 	for i := 0; i < traces.ResourceSpans().Len(); i++ {
 		rspans := traces.ResourceSpans().At(i)
 		resourceAttr := rspans.Resource().Attributes()
-		serviceAttr, ok := resourceAttr.Get(conventions.AttributeServiceName)
-		if !ok || !contains(p.config.ExternallyFacingServices, serviceAttr.Str()) {
-			continue
-		}
+		serviceAttr, serviceAttrOk := resourceAttr.Get(conventions.AttributeServiceName)
 
 		ilsSlice := rspans.ScopeSpans()
 		for j := 0; j < ilsSlice.Len(); j++ {
@@ -402,13 +413,60 @@ func (p *connectorImp) calcExternalDuration(traces ptrace.Traces) float64 {
 			spans := ils.Spans()
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
-				if span.Kind() == ptrace.SpanKindClient {
+				if span.Kind() == ptrace.SpanKindClient && serviceAttrOk && contains(p.config.ExcludeExternalStatsProducedByServices, serviceAttr.Str()) {
 					externalClientSpans = append(externalClientSpans, span)
+				}
+				if span.Kind() == ptrace.SpanKindClient || span.Kind() == ptrace.SpanKindServer {
+					clientServerSpans[span.SpanID()] = span
 				}
 			}
 		}
 	}
 
+	return &spansToProcessForExclusion{
+		externalClientSpans: externalClientSpans,
+		clientServerSpans:   clientServerSpans,
+	}
+}
+
+func (p *connectorImp) getSpansWithExclusions(spansToProcessForExclusion *spansToProcessForExclusion) *spansWithExclusions {
+	// 1. collects parent span ids to ignore due to external span error
+	spansToIgnoreOnError := make(map[pcommon.SpanID]struct{})
+	// collects parent span ids mapped to related external spans to collect 2.
+	spansToExternalSpans := make(map[pcommon.SpanID][]ptrace.Span)
+	for _, externalSpan := range spansToProcessForExclusion.externalClientSpans {
+		parentSpan, parentSpanFound := spansToProcessForExclusion.clientServerSpans[externalSpan.ParentSpanID()]
+		for parentSpanFound {
+			if parentSpan.Status().Code() == ptrace.StatusCodeError {
+				spansToIgnoreOnError[parentSpan.SpanID()] = struct{}{}
+			} else {
+				if _, exists := spansToExternalSpans[parentSpan.SpanID()]; !exists {
+					spansToExternalSpans[parentSpan.SpanID()] = []ptrace.Span{externalSpan}
+				} else {
+					parentExternalSpans := spansToExternalSpans[parentSpan.SpanID()]
+					parentExternalSpans = append(parentExternalSpans, externalSpan)
+					spansToExternalSpans[parentSpan.SpanID()] = parentExternalSpans
+				}
+			}
+			parentSpan, parentSpanFound = spansToProcessForExclusion.clientServerSpans[parentSpan.ParentSpanID()]
+		}
+	}
+
+	// 2. collects parent span ids with external duration to exclude
+	// TODO respect internal IO calls (HTTP requests, Database queries, Redis calls, etc.) duration in-between external IO calls (HTTP requests)
+	spansDurationToExclude := make(map[pcommon.SpanID]float64)
+	for parentSpanId, externalSpans := range spansToExternalSpans {
+		externalDurationToExclude := p.calcExternalDuration(externalSpans)
+		spansDurationToExclude[parentSpanId] = externalDurationToExclude
+	}
+
+	return &spansWithExclusions{
+		spansToIgnoreOnError:   spansToIgnoreOnError,
+		spansDurationToExclude: spansDurationToExclude,
+	}
+}
+
+func (p *connectorImp) calcExternalDuration(externalClientSpans []ptrace.Span) float64 {
 	externalDuration := float64(0)
 	if len(externalClientSpans) != 0 {
 		earliestStartTime := externalClientSpans[0].StartTimestamp()

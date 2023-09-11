@@ -28,11 +28,10 @@ func NewFactory() connector.Factory {
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		AggregationTemporality:  "AGGREGATION_TEMPORALITY_CUMULATIVE",
-		DimensionsCacheSize:     defaultDimensionsCacheSize,
-		MetricsFlushInterval:    15 * time.Second,
-		Histogram:               HistogramConfig{Disable: false, Unit: defaultUnit},
-		ExcludeExternalDuration: false,
+		AggregationTemporality: "AGGREGATION_TEMPORALITY_CUMULATIVE",
+		DimensionsCacheSize:    defaultDimensionsCacheSize,
+		MetricsFlushInterval:   15 * time.Second,
+		Histogram:              HistogramConfig{Disable: false, Unit: defaultUnit},
 	}
 }
 
