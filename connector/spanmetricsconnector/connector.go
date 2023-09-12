@@ -80,8 +80,8 @@ type dimension struct {
 }
 
 type spansToProcessForExclusion struct {
+	allSpans            map[pcommon.SpanID]ptrace.Span
 	externalClientSpans []ptrace.Span
-	clientServerSpans   map[pcommon.SpanID]ptrace.Span
 }
 
 type spansWithExclusions struct {
@@ -363,6 +363,9 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 			spans := ils.Spans()
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
+				if span.Kind() == ptrace.SpanKindInternal {
+					continue
+				}
 				if _, exists := spansWithExclusions.spansToIgnoreOnError[span.SpanID()]; exists {
 					continue
 				}
@@ -401,7 +404,7 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 
 func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *spansToProcessForExclusion {
 	var externalClientSpans []ptrace.Span
-	var clientServerSpans = make(map[pcommon.SpanID]ptrace.Span)
+	var allSpans = make(map[pcommon.SpanID]ptrace.Span)
 	for i := 0; i < traces.ResourceSpans().Len(); i++ {
 		rspans := traces.ResourceSpans().At(i)
 		resourceAttr := rspans.Resource().Attributes()
@@ -413,55 +416,55 @@ func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *span
 			spans := ils.Spans()
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
+				allSpans[span.SpanID()] = span
 				if span.Kind() == ptrace.SpanKindClient && serviceAttrOk && contains(p.config.ExcludeExternalStatsProducedByServices, serviceAttr.Str()) {
 					externalClientSpans = append(externalClientSpans, span)
-				}
-				if span.Kind() == ptrace.SpanKindClient || span.Kind() == ptrace.SpanKindServer {
-					clientServerSpans[span.SpanID()] = span
 				}
 			}
 		}
 	}
 
 	return &spansToProcessForExclusion{
+		allSpans:            allSpans,
 		externalClientSpans: externalClientSpans,
-		clientServerSpans:   clientServerSpans,
 	}
 }
 
 func (p *connectorImp) getSpansWithExclusions(spansToProcessForExclusion *spansToProcessForExclusion) *spansWithExclusions {
 	// 1. collects parent span ids to ignore due to external span error
-	spansToIgnoreOnError := make(map[pcommon.SpanID]struct{})
+	parentSpansToIgnoreOnError := make(map[pcommon.SpanID]struct{})
 	// collects parent span ids mapped to related external spans to collect 2.
-	spansToExternalSpans := make(map[pcommon.SpanID][]ptrace.Span)
+	parentSpansToExternalSpans := make(map[pcommon.SpanID][]ptrace.Span)
 	for _, externalSpan := range spansToProcessForExclusion.externalClientSpans {
-		parentSpan, parentSpanFound := spansToProcessForExclusion.clientServerSpans[externalSpan.ParentSpanID()]
+		parentSpan, parentSpanFound := spansToProcessForExclusion.allSpans[externalSpan.ParentSpanID()]
 		for parentSpanFound {
-			if parentSpan.Status().Code() == ptrace.StatusCodeError {
-				spansToIgnoreOnError[parentSpan.SpanID()] = struct{}{}
-			} else {
-				if _, exists := spansToExternalSpans[parentSpan.SpanID()]; !exists {
-					spansToExternalSpans[parentSpan.SpanID()] = []ptrace.Span{externalSpan}
+			if parentSpan.Kind() == ptrace.SpanKindServer || parentSpan.Kind() == ptrace.SpanKindClient {
+				if parentSpan.Status().Code() == ptrace.StatusCodeError {
+					parentSpansToIgnoreOnError[parentSpan.SpanID()] = struct{}{}
 				} else {
-					parentExternalSpans := spansToExternalSpans[parentSpan.SpanID()]
-					parentExternalSpans = append(parentExternalSpans, externalSpan)
-					spansToExternalSpans[parentSpan.SpanID()] = parentExternalSpans
+					if _, exists := parentSpansToExternalSpans[parentSpan.SpanID()]; !exists {
+						parentSpansToExternalSpans[parentSpan.SpanID()] = []ptrace.Span{externalSpan}
+					} else {
+						parentExternalSpans := parentSpansToExternalSpans[parentSpan.SpanID()]
+						parentExternalSpans = append(parentExternalSpans, externalSpan)
+						parentSpansToExternalSpans[parentSpan.SpanID()] = parentExternalSpans
+					}
 				}
 			}
-			parentSpan, parentSpanFound = spansToProcessForExclusion.clientServerSpans[parentSpan.ParentSpanID()]
+			parentSpan, parentSpanFound = spansToProcessForExclusion.allSpans[parentSpan.ParentSpanID()]
 		}
 	}
 
 	// 2. collects parent span ids with external duration to exclude
 	// TODO respect internal IO calls (HTTP requests, Database queries, Redis calls, etc.) duration in-between external IO calls (HTTP requests)
 	spansDurationToExclude := make(map[pcommon.SpanID]float64)
-	for parentSpanId, externalSpans := range spansToExternalSpans {
+	for parentSpanId, externalSpans := range parentSpansToExternalSpans {
 		externalDurationToExclude := p.calcExternalDuration(externalSpans)
 		spansDurationToExclude[parentSpanId] = externalDurationToExclude
 	}
 
 	return &spansWithExclusions{
-		spansToIgnoreOnError:   spansToIgnoreOnError,
+		spansToIgnoreOnError:   parentSpansToIgnoreOnError,
 		spansDurationToExclude: spansDurationToExclude,
 	}
 }
