@@ -76,6 +76,21 @@ type span struct {
 	endTime      time.Time
 }
 
+type expectations struct {
+	totalDataPointsCount    int
+	serviceMetricsCount     int
+	serviceExpectations     map[string]serviceExpectation
+	serviceSpanExpectations map[string]serviceSpanExpectation
+}
+
+type serviceExpectation struct {
+	metricDataPointsCount int
+}
+
+type serviceSpanExpectation struct {
+	expectedDuration float64
+}
+
 // verifyDisabledHistogram expects that histograms are disabled.
 func verifyDisabledHistogram(t testing.TB, input pmetric.Metrics) bool {
 	for i := 0; i < input.ResourceMetrics().Len(); i++ {
@@ -127,7 +142,7 @@ func verifyConsumeMetricsInputCumulative(t testing.TB, input pmetric.Metrics) bo
 }
 
 // verifyConsumeMetricsInputCumulativeExcludingExternalStats expects one accumulation of metrics, and marked as cumulative
-func verifyConsumeMetricsInputCumulativeExcludingExternalStats(t testing.TB, input pmetric.Metrics, expectations map[string]struct{ expectedDuration float64 }) bool {
+func verifyConsumeMetricsInputCumulativeExcludingExternalStats(t testing.TB, input pmetric.Metrics, expectations *expectations) bool {
 	return verifyConsumeMetricsInputExcludingExternalStats(t, input, pmetric.AggregationTemporalityCumulative, 1, expectations)
 }
 
@@ -261,27 +276,22 @@ func verifyExplicitHistogramDataPoints(t testing.TB, dps pmetric.HistogramDataPo
 
 // verifyConsumeMetricsInputExcludingExternalStats verifies the input of the ConsumeMetrics call from this connector.
 // This is the best point to verify the computed metrics from spans are as expected.
-func verifyConsumeMetricsInputExcludingExternalStats(t testing.TB, input pmetric.Metrics, expectedTemporality pmetric.AggregationTemporality, numCumulativeConsumptions int, expectations map[string]struct{ expectedDuration float64 }) bool {
-	require.Equal(t, 8, input.DataPointCount(),
-		"Should be 4 for each of call count and latency split into two resource scopes defined by: "+
+func verifyConsumeMetricsInputExcludingExternalStats(t testing.TB, input pmetric.Metrics, expectedTemporality pmetric.AggregationTemporality, numCumulativeConsumptions int, expectations *expectations) bool {
+	require.Equal(t, expectations.totalDataPointsCount, input.DataPointCount(),
+		"Should be 2 for each non ignored span: call count and latency, both split into 2 resource scopes (server and client) defined by: "+
 			"service-a: service-a (server kind) -> service-a (client kind) and "+
 			"service-b: service-b (service kind) -> service-b (client kind) -> external",
 	)
 
-	require.Equal(t, 2, input.ResourceMetrics().Len())
+	require.Equal(t, expectations.serviceMetricsCount, input.ResourceMetrics().Len())
 
 	for i := 0; i < input.ResourceMetrics().Len(); i++ {
 		rm := input.ResourceMetrics().At(i)
 
-		var numDataPoints int
 		val, ok := rm.Resource().Attributes().Get(serviceNameKey)
 		require.True(t, ok)
 		serviceName := val.AsString()
-		if serviceName == "service-a" {
-			numDataPoints = 2
-		} else if serviceName == "service-b" {
-			numDataPoints = 2
-		}
+		numDataPoints := expectations.serviceExpectations[serviceName].metricDataPointsCount
 
 		ilm := rm.ScopeMetrics()
 		require.Equal(t, 1, ilm.Len())
@@ -323,7 +333,7 @@ func verifyConsumeMetricsInputExcludingExternalStats(t testing.TB, input pmetric
 	return true
 }
 
-func verifyExplicitHistogramDataPointsExcludingExternalStats(t testing.TB, dps pmetric.HistogramDataPointSlice, numDataPoints, numCumulativeConsumptions int, expectations map[string]struct{ expectedDuration float64 }) {
+func verifyExplicitHistogramDataPointsExcludingExternalStats(t testing.TB, dps pmetric.HistogramDataPointSlice, numDataPoints, numCumulativeConsumptions int, expectations *expectations) {
 	seenMetricIDs := make(map[metricID]bool)
 	require.Equal(t, numDataPoints, dps.Len())
 	for dpi := 0; dpi < numDataPoints; dpi++ {
@@ -333,7 +343,7 @@ func verifyExplicitHistogramDataPointsExcludingExternalStats(t testing.TB, dps p
 		require.True(t, ok)
 		spanKind, ok := dp.Attributes().Get(spanKindKey)
 		require.True(t, ok)
-		expectedDuration := expectations[serviceName.AsString()+spanKind.AsString()].expectedDuration
+		expectedDuration := expectations.serviceSpanExpectations[serviceName.AsString()+spanKind.AsString()].expectedDuration
 
 		assert.Equal(
 			t,
@@ -1047,38 +1057,109 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 		aggregationTemporality string
 		histogramConfig        func() HistogramConfig
 		exemplarConfig         func() ExemplarsConfig
-		verifier               func(t testing.TB, input pmetric.Metrics, expectations map[string]struct{ expectedDuration float64 }) bool
+		verifier               func(t testing.TB, input pmetric.Metrics, expectations *expectations) bool
 		traces                 []ptrace.Traces
-		expectations           map[string]struct {
-			expectedDuration float64
-		}
+		expectations           *expectations
 	}{
 		{
-			name:                   "Test single consumption, four spans (Cumulative), all spans successful.",
+			name:                   "Test single consumption, four spans (Cumulative), all spans ok.",
 			aggregationTemporality: cumulative,
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
 			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
-				"service-aSPAN_KIND_SERVER": ptrace.StatusCodeOk,
-				"service-aSPAN_KIND_CLIENT": ptrace.StatusCodeOk,
-				"service-bSPAN_KIND_SERVER": ptrace.StatusCodeOk,
-				"service-bSPAN_KIND_CLIENT": ptrace.StatusCodeOk,
+				"service-aServer": ptrace.StatusCodeOk,
+				"service-aClient": ptrace.StatusCodeOk,
+				"service-bServer": ptrace.StatusCodeOk,
+				"service-bClient": ptrace.StatusCodeOk,
 			})},
-			expectations: map[string]struct {
-				expectedDuration float64
-			}{
-				"service-aSPAN_KIND_SERVER": {
-					expectedDuration: float64(6000),
+			expectations: &expectations{
+				totalDataPointsCount: 8,
+				serviceMetricsCount:  2,
+				serviceExpectations: map[string]serviceExpectation{
+					"service-a": {
+						metricDataPointsCount: 2,
+					},
+					"service-b": {
+						metricDataPointsCount: 2,
+					},
 				},
-				"service-aSPAN_KIND_CLIENT": {
-					expectedDuration: float64(4000),
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-aSPAN_KIND_SERVER": {
+						expectedDuration: float64(6000),
+					},
+					"service-aSPAN_KIND_CLIENT": {
+						expectedDuration: float64(4000),
+					},
+					"service-bSPAN_KIND_SERVER": {
+						expectedDuration: float64(2000),
+					},
+					"service-bSPAN_KIND_CLIENT": {
+						expectedDuration: float64(4000),
+					},
 				},
-				"service-bSPAN_KIND_SERVER": {
-					expectedDuration: float64(2000),
+			},
+		},
+		{
+			name:                   "Test single consumption, four spans (Cumulative), 1 span ok and 3 spans error.",
+			aggregationTemporality: cumulative,
+			histogramConfig:        explicitHistogramsConfig,
+			exemplarConfig:         disabledExemplarsConfig,
+			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
+				"service-aServer": ptrace.StatusCodeOk,
+				"service-aClient": ptrace.StatusCodeError,
+				"service-bServer": ptrace.StatusCodeError,
+				"service-bClient": ptrace.StatusCodeError,
+			})},
+			expectations: &expectations{
+				totalDataPointsCount: 4,
+				serviceMetricsCount:  2,
+				serviceExpectations: map[string]serviceExpectation{
+					"service-a": {
+						metricDataPointsCount: 1,
+					},
+					"service-b": {
+						metricDataPointsCount: 1,
+					},
 				},
-				"service-bSPAN_KIND_CLIENT": {
-					expectedDuration: float64(4000),
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-aSPAN_KIND_SERVER": {
+						expectedDuration: float64(6000),
+					},
+					"service-bSPAN_KIND_CLIENT": {
+						expectedDuration: float64(4000),
+					},
+				},
+			},
+		},
+		{
+			name:                   "Test single consumption, four spans (Cumulative), all spans error.",
+			aggregationTemporality: cumulative,
+			histogramConfig:        explicitHistogramsConfig,
+			exemplarConfig:         disabledExemplarsConfig,
+			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
+				"service-aServer": ptrace.StatusCodeError,
+				"service-aClient": ptrace.StatusCodeError,
+				"service-bServer": ptrace.StatusCodeError,
+				"service-bClient": ptrace.StatusCodeError,
+			})},
+			expectations: &expectations{
+				totalDataPointsCount: 2,
+				serviceMetricsCount:  2,
+				serviceExpectations: map[string]serviceExpectation{
+					"service-a": {
+						metricDataPointsCount: 0,
+					},
+					"service-b": {
+						metricDataPointsCount: 1,
+					},
+				},
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-bSPAN_KIND_CLIENT": {
+						expectedDuration: float64(4000),
+					},
 				},
 			},
 		},
