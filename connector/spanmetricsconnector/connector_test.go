@@ -74,6 +74,7 @@ type span struct {
 	spanID       [8]byte
 	startTime    time.Time
 	endTime      time.Time
+	attributes   map[string]string
 }
 
 type expectations struct {
@@ -536,6 +537,9 @@ func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.Statu
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x20},
 					startTime:    now.Add(time.Duration(1) * time.Second),
 					endTime:      now.Add(time.Duration(9) * time.Second),
+					attributes: map[string]string{
+						"net.peer.name": "service-b.internal.com",
+					},
 				},
 			},
 		}, traces.ResourceSpans().AppendEmpty())
@@ -572,6 +576,9 @@ func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.Statu
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x23},
 					startTime:    now.Add(time.Duration(3) * time.Second),
 					endTime:      now.Add(time.Duration(7) * time.Second),
+					attributes: map[string]string{
+						"net.peer.name": "some.bank.com",
+					},
 				},
 			},
 		}, traces.ResourceSpans().AppendEmpty())
@@ -609,6 +616,9 @@ func initSpan(span span, s ptrace.Span) {
 		s.SetEndTimestamp(pcommon.NewTimestampFromTime(span.endTime))
 	}
 
+	for name, value := range span.attributes {
+		s.Attributes().PutStr(name, value)
+	}
 	s.Attributes().PutStr(stringAttrName, "stringAttrValue")
 	s.Attributes().PutInt(intAttrName, 99)
 	s.Attributes().PutDouble(doubleAttrName, 99.99)
@@ -806,7 +816,7 @@ func TestConcurrentShutdown(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Test
-	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, []string{})
+	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, ExternalStatsExclusionConfig{})
 	err := p.Start(ctx, componenttest.NewNopHost())
 	require.NoError(t, err)
 
@@ -886,7 +896,7 @@ func TestConsumeMetricsErrors(t *testing.T) {
 	}
 	mockClock := clock.NewMock(time.Now())
 	ticker := mockClock.NewTicker(time.Nanosecond)
-	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, []string{})
+	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, ExternalStatsExclusionConfig{})
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())
@@ -1048,7 +1058,7 @@ func TestConsumeTraces(t *testing.T) {
 			mockClock := clock.NewMock(time.Now())
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
-			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, []string{})
+			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, ExternalStatsExclusionConfig{})
 
 			ctx := metadata.NewIncomingContext(context.Background(), nil)
 			err := p.Start(ctx, componenttest.NewNopHost())
@@ -1199,7 +1209,15 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			mockClock := clock.NewMock(time.Now())
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
-			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, []string{"service-b"})
+			externalStatsExclusionConfig := ExternalStatsExclusionConfig{
+				ExternallyFacingServices: []string{"service-b"},
+				HostAttribute: &HostAttributeConfig{
+					AttributeName:       "net.peer.name",
+					InternalHostPattern: ".*internal.com",
+				},
+			}
+
+			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, externalStatsExclusionConfig)
 
 			ctx := metadata.NewIncomingContext(context.Background(), nil)
 			err := p.Start(ctx, componenttest.NewNopHost())
@@ -1225,7 +1243,7 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 func TestMetricKeyCache(t *testing.T) {
 	mcon := consumertest.NewNop()
 
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, []string{})
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, ExternalStatsExclusionConfig{})
 	traces := buildSampleTrace()
 
 	// Test
@@ -1256,7 +1274,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 	// Prepare
 	mcon := consumertest.NewNop()
 
-	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil, []string{})
+	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil, ExternalStatsExclusionConfig{})
 
 	traces := buildSampleTrace()
 
@@ -1270,7 +1288,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 	mcon := consumertest.NewNop()
 	excludeDimensions := []string{"span.kind", "span.name", "totallyWrongNameDoesNotAffectAnything"}
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, []string{}, excludeDimensions...)
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, ExternalStatsExclusionConfig{}, excludeDimensions...)
 	traces := buildSampleTrace()
 
 	// Test
@@ -1319,7 +1337,7 @@ func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 
 }
 
-func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, excludeExternalStatsProducedByServices []string, excludedDimensions ...string) *connectorImp {
+func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, externalStatsExclusion ExternalStatsExclusionConfig, excludedDimensions ...string) *connectorImp {
 	cfg := &Config{
 		AggregationTemporality: temporality,
 		Histogram:              histogramConfig(),
@@ -1342,7 +1360,7 @@ func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *stri
 			// Add a resource attribute to test "process" attributes like IP, host, region, cluster, etc.
 			{regionResourceAttrName, nil},
 		},
-		ExcludeExternalStatsProducedByServices: excludeExternalStatsProducedByServices,
+		ExternalStatsExclusion: externalStatsExclusion,
 	}
 	c, err := newConnector(logger, cfg, ticker)
 	require.NoError(t, err)
@@ -1437,7 +1455,7 @@ func TestConnectorConsumeTracesEvictedCacheKey(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Note: default dimension key cache size is 2.
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker, []string{})
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker, ExternalStatsExclusionConfig{})
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())

@@ -6,6 +6,9 @@ package spanmetricsconnector // import "github.com/open-telemetry/opentelemetry-
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -214,7 +217,7 @@ func (p *connectorImp) Capabilities() consumer.Capabilities {
 // It aggregates the trace data to generate metrics.
 func (p *connectorImp) ConsumeTraces(_ context.Context, traces ptrace.Traces) error {
 	p.lock.Lock()
-	if len(p.config.ExcludeExternalStatsProducedByServices) != 0 {
+	if len(p.config.ExternalStatsExclusion.ExternallyFacingServices) != 0 {
 		p.aggregateMetricsExcludingExternalStats(traces)
 	} else {
 		p.aggregateMetrics(traces)
@@ -403,6 +406,16 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 }
 
 func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *spansToProcessForExclusion {
+	// TODO move regexp compile to the factory, so that it's compiled only once on startup
+	internalHostPatternRegex, err := regexp.Compile(p.config.ExternalStatsExclusion.HostAttribute.InternalHostPattern)
+	if err != nil {
+		fmt.Println("Error compiling config.ExternalStatsExclusion.internalHostPattern regex:", err)
+		return &spansToProcessForExclusion{
+			allSpans:            make(map[pcommon.SpanID]ptrace.Span),
+			externalClientSpans: []ptrace.Span{},
+		}
+	}
+
 	var externalClientSpans []ptrace.Span
 	var allSpans = make(map[pcommon.SpanID]ptrace.Span)
 	for i := 0; i < traces.ResourceSpans().Len(); i++ {
@@ -417,7 +430,10 @@ func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *span
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
 				allSpans[span.SpanID()] = span
-				if span.Kind() == ptrace.SpanKindClient && serviceAttrOk && contains(p.config.ExcludeExternalStatsProducedByServices, serviceAttr.Str()) {
+				hostAttr, hostAttrOk := span.Attributes().Get(p.config.ExternalStatsExclusion.HostAttribute.AttributeName)
+				if span.Kind() == ptrace.SpanKindClient &&
+					serviceAttrOk && contains(p.config.ExternalStatsExclusion.ExternallyFacingServices, serviceAttr.Str()) &&
+					hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
 					externalClientSpans = append(externalClientSpans, span)
 				}
 			}
@@ -455,12 +471,11 @@ func (p *connectorImp) getSpansWithExclusions(spansToProcessForExclusion *spansT
 		}
 	}
 
-	// 2. collects parent span ids with external duration to exclude
-	// TODO respect internal IO calls (HTTP requests, Database queries, Redis calls, etc.) duration in-between external IO calls (HTTP requests)
+	// 2. collects parent span ids with total external duration to exclude
 	spansDurationToExclude := make(map[pcommon.SpanID]float64)
 	for parentSpanId, externalSpans := range parentSpansToExternalSpans {
-		externalDurationToExclude := p.calcExternalDuration(externalSpans)
-		spansDurationToExclude[parentSpanId] = externalDurationToExclude
+		totalExternalDurationToExclude := p.calcTotalExternalDuration(externalSpans)
+		spansDurationToExclude[parentSpanId] = totalExternalDurationToExclude
 	}
 
 	return &spansWithExclusions{
@@ -469,23 +484,34 @@ func (p *connectorImp) getSpansWithExclusions(spansToProcessForExclusion *spansT
 	}
 }
 
-func (p *connectorImp) calcExternalDuration(externalClientSpans []ptrace.Span) float64 {
-	externalDuration := float64(0)
+func (p *connectorImp) calcTotalExternalDuration(externalClientSpans []ptrace.Span) float64 {
+	totalExternalDuration := float64(0)
 	if len(externalClientSpans) != 0 {
-		earliestStartTime := externalClientSpans[0].StartTimestamp()
-		latestEndTime := externalClientSpans[0].EndTimestamp()
-		for _, span := range externalClientSpans {
-			if span.StartTimestamp().AsTime().Before(earliestStartTime.AsTime()) {
-				earliestStartTime = span.StartTimestamp()
-			}
-			if span.EndTimestamp().AsTime().After(latestEndTime.AsTime()) {
-				latestEndTime = span.EndTimestamp()
+		sort.Slice(externalClientSpans, func(i, j int) bool {
+			return externalClientSpans[i].StartTimestamp() < externalClientSpans[j].StartTimestamp()
+		})
+
+		currentStartTimestamp := externalClientSpans[0].StartTimestamp()
+		currentEndTimestamp := externalClientSpans[0].EndTimestamp()
+
+		for i := 1; i < len(externalClientSpans); i++ {
+			if externalClientSpans[i].StartTimestamp() >= currentEndTimestamp {
+				// Non-overlapping span
+				totalExternalDuration += float64(currentEndTimestamp - currentStartTimestamp)
+				currentStartTimestamp = externalClientSpans[i].StartTimestamp()
+				currentEndTimestamp = externalClientSpans[i].EndTimestamp()
+			} else {
+				// Overlapping span
+				if externalClientSpans[i].EndTimestamp() > currentEndTimestamp {
+					currentEndTimestamp = externalClientSpans[i].EndTimestamp()
+				}
 			}
 		}
-		externalDuration = float64(latestEndTime - earliestStartTime)
+		// Add the duration of the last span(s)
+		totalExternalDuration += float64(currentEndTimestamp - currentStartTimestamp)
 	}
 
-	return externalDuration
+	return totalExternalDuration
 }
 
 func (p *connectorImp) addExemplar(span ptrace.Span, duration float64, h metrics.Histogram) {
