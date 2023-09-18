@@ -409,7 +409,7 @@ func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *span
 	// TODO move regexp compile to the factory, so that it's compiled only once on startup
 	internalHostPatternRegex, err := regexp.Compile(p.config.ExternalStatsExclusion.HostAttribute.InternalHostPattern)
 	if err != nil {
-		fmt.Println("Error compiling config.ExternalStatsExclusion.internalHostPattern regex:", err)
+		fmt.Println("Error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex:", err)
 		return &spansToProcessForExclusion{
 			allSpans:            make(map[pcommon.SpanID]ptrace.Span),
 			externalClientSpans: []ptrace.Span{},
