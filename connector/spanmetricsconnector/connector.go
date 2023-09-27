@@ -6,7 +6,6 @@ package spanmetricsconnector // import "github.com/open-telemetry/opentelemetry-
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"regexp"
 	"sort"
 	"sync"
@@ -44,9 +43,10 @@ const (
 )
 
 type connectorImp struct {
-	lock   sync.Mutex
-	logger *zap.Logger
-	config Config
+	lock          sync.Mutex
+	logger        *zap.Logger
+	sugaredLogger *zap.SugaredLogger
+	config        Config
 
 	metricsConsumer consumer.Metrics
 
@@ -82,14 +82,24 @@ type dimension struct {
 	value *pcommon.Value
 }
 
-type spansToProcessForExclusion struct {
-	allSpans            map[pcommon.SpanID]ptrace.Span
-	externalClientSpans []ptrace.Span
+type serviceSpansUngrouped struct {
+	serverSpan ptrace.Span
+	otherSpans []ptrace.Span
 }
 
-type spansWithExclusions struct {
-	spansToIgnoreOnError   map[pcommon.SpanID]struct{}
-	spansDurationToExclude map[pcommon.SpanID]float64
+type serviceSpansGrouped struct {
+	serverSpan      ptrace.Span
+	otherSpanGroups [][]ptrace.Span
+}
+
+type serviceServerSpanDetails struct {
+	hasExternalSpansWithError bool
+	internalDurationTotal     float64
+}
+
+type customDuration struct {
+	startTimestamp pcommon.Timestamp
+	endTimestamp   pcommon.Timestamp
 }
 
 func newDimensions(cfgDims []Dimension) []dimension {
@@ -118,6 +128,7 @@ func newConnector(logger *zap.Logger, config component.Config, ticker *clock.Tic
 
 	return &connectorImp{
 		logger:                logger,
+		sugaredLogger:         logger.Sugar(),
 		config:                *cfg,
 		startTimestamp:        pcommon.NewTimestampFromTime(time.Now()),
 		resourceMetrics:       make(map[resourceKey]*resourceMetrics),
@@ -217,8 +228,8 @@ func (p *connectorImp) Capabilities() consumer.Capabilities {
 // It aggregates the trace data to generate metrics.
 func (p *connectorImp) ConsumeTraces(_ context.Context, traces ptrace.Traces) error {
 	p.lock.Lock()
-	if len(p.config.ExternalStatsExclusion.ExternallyFacingServices) != 0 {
-		p.aggregateMetricsExcludingExternalStats(traces)
+	if p.config.ExternalStatsExclusion != nil {
+		p.generateServiceServerMetricsExcludingExternalStats(traces)
 	} else {
 		p.aggregateMetrics(traces)
 	}
@@ -343,8 +354,8 @@ func (p *connectorImp) aggregateMetrics(traces ptrace.Traces) {
 	}
 }
 
-func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Traces) {
-	spansWithExclusions := p.getSpansWithExclusions(p.getSpansToProcessForExclusion(traces))
+func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces ptrace.Traces) {
+	serverSpanDetailsByService := p.getServerSpanDetailsByService(traces)
 
 	for i := 0; i < traces.ResourceSpans().Len(); i++ {
 		rspans := traces.ResourceSpans().At(i)
@@ -366,25 +377,12 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 			spans := ils.Spans()
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
-				if span.Kind() == ptrace.SpanKindInternal {
+				if span.Kind() != ptrace.SpanKindServer ||
+					(span.Kind() == ptrace.SpanKindServer && span.Status().Code() == ptrace.StatusCodeError && serverSpanDetailsByService[serviceName].hasExternalSpansWithError) {
 					continue
 				}
-				if _, exists := spansWithExclusions.spansToIgnoreOnError[span.SpanID()]; exists {
-					continue
-				}
-				// Protect against end timestamps before start timestamps. Assume 0 duration.
-				duration := float64(0)
-				startTime := span.StartTimestamp()
-				endTime := span.EndTimestamp()
-				if endTime > startTime {
-					externalDuration, exists := spansWithExclusions.spansDurationToExclude[span.SpanID()]
-					if !exists {
-						externalDuration = float64(0)
-					}
-					duration = (float64(endTime-startTime) - externalDuration) / float64(unitDivider)
-				}
+				duration := serverSpanDetailsByService[serviceName].internalDurationTotal / float64(unitDivider)
 				key := p.buildKey(serviceName, span, p.dimensions, resourceAttr)
-
 				attributes, ok := p.metricKeyToDimensions.Get(key)
 				if !ok {
 					attributes = p.buildAttributes(serviceName, span, resourceAttr)
@@ -395,7 +393,6 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 					h := histograms.GetOrCreate(key, attributes)
 					p.addExemplar(span, duration, h)
 					h.Observe(duration)
-
 				}
 				// aggregate sums metrics
 				s := sums.GetOrCreate(key, attributes)
@@ -405,113 +402,155 @@ func (p *connectorImp) aggregateMetricsExcludingExternalStats(traces ptrace.Trac
 	}
 }
 
-func (p *connectorImp) getSpansToProcessForExclusion(traces ptrace.Traces) *spansToProcessForExclusion {
+func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[string]*serviceServerSpanDetails {
 	// TODO move regexp compile to the factory, so that it's compiled only once on startup
 	internalHostPatternRegex, err := regexp.Compile(p.config.ExternalStatsExclusion.HostAttribute.InternalHostPattern)
 	if err != nil {
-		fmt.Println("Error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex:", err)
-		return &spansToProcessForExclusion{
-			allSpans:            make(map[pcommon.SpanID]ptrace.Span),
-			externalClientSpans: []ptrace.Span{},
-		}
+		p.logger.Error("Error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex:", zap.Error(err))
+		return make(map[string]*serviceServerSpanDetails)
 	}
 
-	var externalClientSpans []ptrace.Span
-	var allSpans = make(map[pcommon.SpanID]ptrace.Span)
-	for i := 0; i < traces.ResourceSpans().Len(); i++ {
-		rspans := traces.ResourceSpans().At(i)
-		resourceAttr := rspans.Resource().Attributes()
-		serviceAttr, serviceAttrOk := resourceAttr.Get(conventions.AttributeServiceName)
+	var serverSpanDetailsByService = make(map[string]*serviceServerSpanDetails)
 
-		ilsSlice := rspans.ScopeSpans()
-		for j := 0; j < ilsSlice.Len(); j++ {
-			ils := ilsSlice.At(j)
-			spans := ils.Spans()
-			for k := 0; k < spans.Len(); k++ {
-				span := spans.At(k)
-				allSpans[span.SpanID()] = span
+	for serviceName, serviceSpanGroups := range p.getGroupedSpansByService(p.getUngroupedSpansByService(traces)) {
+		var hasExternalSpansWithError = false
+		var internalDuration = customDuration{
+			startTimestamp: 0,
+			endTimestamp:   0,
+		}
+
+		for _, spansGroup := range serviceSpanGroups.otherSpanGroups {
+			var externalSpans []ptrace.Span
+
+			for _, span := range spansGroup {
 				hostAttr, hostAttrOk := span.Attributes().Get(p.config.ExternalStatsExclusion.HostAttribute.AttributeName)
-				if span.Kind() == ptrace.SpanKindClient &&
-					serviceAttrOk && contains(p.config.ExternalStatsExclusion.ExternallyFacingServices, serviceAttr.Str()) &&
-					hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
-					externalClientSpans = append(externalClientSpans, span)
-				}
-			}
-		}
-	}
-
-	return &spansToProcessForExclusion{
-		allSpans:            allSpans,
-		externalClientSpans: externalClientSpans,
-	}
-}
-
-func (p *connectorImp) getSpansWithExclusions(spansToProcessForExclusion *spansToProcessForExclusion) *spansWithExclusions {
-	// 1. collects parent span ids to ignore due to external span error
-	parentSpansToIgnoreOnError := make(map[pcommon.SpanID]struct{})
-	// collects parent span ids mapped to related external spans to collect 2.
-	parentSpansToExternalSpans := make(map[pcommon.SpanID][]ptrace.Span)
-	for _, externalSpan := range spansToProcessForExclusion.externalClientSpans {
-		parentSpan, parentSpanFound := spansToProcessForExclusion.allSpans[externalSpan.ParentSpanID()]
-		for parentSpanFound {
-			if parentSpan.Kind() == ptrace.SpanKindServer || parentSpan.Kind() == ptrace.SpanKindClient {
-				if parentSpan.Status().Code() == ptrace.StatusCodeError {
-					parentSpansToIgnoreOnError[parentSpan.SpanID()] = struct{}{}
-				} else {
-					if _, exists := parentSpansToExternalSpans[parentSpan.SpanID()]; !exists {
-						parentSpansToExternalSpans[parentSpan.SpanID()] = []ptrace.Span{externalSpan}
-					} else {
-						parentExternalSpans := parentSpansToExternalSpans[parentSpan.SpanID()]
-						parentExternalSpans = append(parentExternalSpans, externalSpan)
-						parentSpansToExternalSpans[parentSpan.SpanID()] = parentExternalSpans
+				if span.Kind() == ptrace.SpanKindClient && hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
+					// external span
+					if span.Status().Code() == ptrace.StatusCodeError {
+						hasExternalSpansWithError = true
 					}
+					externalSpans = append(externalSpans, span)
+				} else {
+					// internal span
+					internalDuration = p.calcInternalDuration(span, externalSpans, internalDuration)
 				}
 			}
-			parentSpan, parentSpanFound = spansToProcessForExclusion.allSpans[parentSpan.ParentSpanID()]
+		}
+
+		var internalDurationTotal = float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
+		serverSpanDurationTotal := float64(serviceSpanGroups.serverSpan.EndTimestamp() - serviceSpanGroups.serverSpan.StartTimestamp())
+		if serverSpanDurationTotal < internalDurationTotal {
+			internalDurationTotal = serverSpanDurationTotal
+			p.sugaredLogger.Warnf("Service=%s traceId=%s calculated total_internal_duration=%f is more than server_span_duration=%f!", serviceName, serviceSpanGroups.serverSpan.TraceID(), internalDurationTotal, serverSpanDurationTotal)
+		}
+
+		serverSpanDetailsByService[serviceName] = &serviceServerSpanDetails{
+			hasExternalSpansWithError: hasExternalSpansWithError,
+			internalDurationTotal:     internalDurationTotal,
 		}
 	}
 
-	// 2. collects parent span ids with total external duration to exclude
-	spansDurationToExclude := make(map[pcommon.SpanID]float64)
-	for parentSpanId, externalSpans := range parentSpansToExternalSpans {
-		totalExternalDurationToExclude := p.calcTotalExternalDuration(externalSpans)
-		spansDurationToExclude[parentSpanId] = totalExternalDurationToExclude
-	}
-
-	return &spansWithExclusions{
-		spansToIgnoreOnError:   parentSpansToIgnoreOnError,
-		spansDurationToExclude: spansDurationToExclude,
-	}
+	return serverSpanDetailsByService
 }
 
-func (p *connectorImp) calcTotalExternalDuration(externalClientSpans []ptrace.Span) float64 {
-	totalExternalDuration := float64(0)
-	if len(externalClientSpans) != 0 {
-		sort.Slice(externalClientSpans, func(i, j int) bool {
-			return externalClientSpans[i].StartTimestamp() < externalClientSpans[j].StartTimestamp()
+func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[string]*serviceSpansUngrouped) map[string]*serviceSpansGrouped {
+	var groupedSpansByService = make(map[string]*serviceSpansGrouped)
+
+	for serviceName, ungroupedSpans := range ungroupedSpansByService {
+		sort.Slice(ungroupedSpans.otherSpans, func(i, j int) bool {
+			return ungroupedSpans.otherSpans[i].StartTimestamp() < ungroupedSpans.otherSpans[j].StartTimestamp()
 		})
 
-		currentStartTimestamp := externalClientSpans[0].StartTimestamp()
-		currentEndTimestamp := externalClientSpans[0].EndTimestamp()
-
-		for i := 1; i < len(externalClientSpans); i++ {
-			if externalClientSpans[i].StartTimestamp() >= currentEndTimestamp {
-				// Non-overlapping span
-				totalExternalDuration += float64(currentEndTimestamp - currentStartTimestamp)
-				currentStartTimestamp = externalClientSpans[i].StartTimestamp()
-				currentEndTimestamp = externalClientSpans[i].EndTimestamp()
+		var groupedSpans [][]ptrace.Span
+		for _, ungroupedSpan := range ungroupedSpans.otherSpans {
+			if len(groupedSpans) != 0 {
+				minStartEndDelta := ungroupedSpan.StartTimestamp() - groupedSpans[0][len(groupedSpans[0])-1].EndTimestamp()
+				spanTargetGroup := &groupedSpans[0]
+				for _, spansGroup := range groupedSpans {
+					startEndDelta := ungroupedSpan.StartTimestamp() - spansGroup[len(spansGroup)-1].EndTimestamp()
+					if startEndDelta >= 0 && startEndDelta < minStartEndDelta {
+						minStartEndDelta = startEndDelta
+						spanTargetGroup = &spansGroup
+					}
+				}
+				*spanTargetGroup = append(*spanTargetGroup, ungroupedSpan)
 			} else {
-				// Overlapping span
-				if externalClientSpans[i].EndTimestamp() > currentEndTimestamp {
-					currentEndTimestamp = externalClientSpans[i].EndTimestamp()
+				groupedSpans = append(groupedSpans, []ptrace.Span{ungroupedSpan})
+			}
+		}
+		groupedSpansByService[serviceName] = &serviceSpansGrouped{
+			serverSpan:      ungroupedSpans.serverSpan,
+			otherSpanGroups: groupedSpans,
+		}
+	}
+
+	return groupedSpansByService
+}
+
+func (p *connectorImp) getUngroupedSpansByService(traces ptrace.Traces) map[string]*serviceSpansUngrouped {
+	var ungroupedSpansByService = make(map[string]*serviceSpansUngrouped)
+
+	for i := 0; i < traces.ResourceSpans().Len(); i++ {
+		rspans := traces.ResourceSpans().At(i)
+		serviceAttr, serviceAttrOk := rspans.Resource().Attributes().Get(conventions.AttributeServiceName)
+		if !serviceAttrOk {
+			p.logger.Warn("Service attribute missing!")
+			continue
+		}
+
+		var serviceServerSpan ptrace.Span
+		var serviceOtherSpans []ptrace.Span
+		ilsSlice := rspans.ScopeSpans()
+		for j := 0; j < ilsSlice.Len(); j++ {
+			spans := ilsSlice.At(j).Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				if span.Kind() == ptrace.SpanKindServer {
+					serviceServerSpan = span
+				} else {
+					serviceOtherSpans = append(serviceOtherSpans, span)
 				}
 			}
 		}
-		// Add the duration of the last span(s)
-		totalExternalDuration += float64(currentEndTimestamp - currentStartTimestamp)
+
+		if _, exists := ungroupedSpansByService[serviceAttr.Str()]; !exists {
+			ungroupedSpansByService[serviceAttr.Str()] = &serviceSpansUngrouped{
+				serverSpan: serviceServerSpan,
+				otherSpans: serviceOtherSpans,
+			}
+		} else {
+			ungroupedSpansByService[serviceAttr.Str()].otherSpans = append(ungroupedSpansByService[serviceAttr.Str()].otherSpans, serviceOtherSpans...)
+		}
 	}
 
-	return totalExternalDuration
+	return ungroupedSpansByService
+}
+
+func (p *connectorImp) calcInternalDuration(span ptrace.Span, externalSpans []ptrace.Span, internalDuration customDuration) customDuration {
+	spanStartTimestamp := span.StartTimestamp()
+	spanEndTimestamp := span.EndTimestamp()
+
+	if len(externalSpans) != 0 {
+		for _, externalSpan := range externalSpans {
+			externalSpanDuration := externalSpan.EndTimestamp() - externalSpan.StartTimestamp()
+			spanStartTimestamp = spanStartTimestamp - externalSpanDuration
+			spanEndTimestamp = spanEndTimestamp - externalSpanDuration
+		}
+	}
+
+	if internalDuration.startTimestamp == 0 && internalDuration.endTimestamp == 0 {
+		internalDuration.startTimestamp = spanStartTimestamp
+		internalDuration.endTimestamp = spanEndTimestamp
+	} else {
+		if internalDuration.startTimestamp > spanStartTimestamp {
+			internalDuration.startTimestamp = spanStartTimestamp
+		}
+		if internalDuration.endTimestamp < spanEndTimestamp {
+			internalDuration.endTimestamp = spanEndTimestamp
+		}
+	}
+
+	return internalDuration
 }
 
 func (p *connectorImp) addExemplar(span ptrace.Span, duration float64, h metrics.Histogram) {

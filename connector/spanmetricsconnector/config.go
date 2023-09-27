@@ -59,12 +59,11 @@ type Config struct {
 	// Exemplars defines the configuration for exemplars.
 	Exemplars ExemplarsConfig `mapstructure:"exemplars"`
 
-	ExternalStatsExclusion ExternalStatsExclusionConfig `mapstructure:"external_stats_exclusion"`
+	ExternalStatsExclusion *ExternalStatsExclusionConfig `mapstructure:"external_stats_exclusion"`
 }
 
 type ExternalStatsExclusionConfig struct {
-	ExternallyFacingServices []string             `mapstructure:"externally_facing_services"`
-	HostAttribute            *HostAttributeConfig `mapstructure:"host_attribute"`
+	HostAttribute *HostAttributeConfig `mapstructure:"host_attribute"`
 }
 
 type HostAttributeConfig struct {
