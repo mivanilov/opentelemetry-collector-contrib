@@ -424,7 +424,7 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 
 			for _, span := range spansGroup {
 				hostAttr, hostAttrOk := span.Attributes().Get(p.config.ExternalStatsExclusion.HostAttribute.AttributeName)
-				if span.Kind() == ptrace.SpanKindClient && hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
+				if hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
 					// external span
 					if span.Status().Code() == ptrace.StatusCodeError {
 						hasExternalSpansWithError = true
@@ -463,21 +463,27 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 
 		var groupedSpans [][]ptrace.Span
 		for _, ungroupedSpan := range ungroupedSpans.otherSpans {
+			spanTargetGroupIndex := -1
 			if len(groupedSpans) != 0 {
-				minStartEndDelta := ungroupedSpan.StartTimestamp() - groupedSpans[0][len(groupedSpans[0])-1].EndTimestamp()
-				spanTargetGroup := &groupedSpans[0]
-				for _, spansGroup := range groupedSpans {
-					startEndDelta := ungroupedSpan.StartTimestamp() - spansGroup[len(spansGroup)-1].EndTimestamp()
-					if startEndDelta >= 0 && startEndDelta < minStartEndDelta {
+				minStartEndDelta := int64(ungroupedSpan.StartTimestamp() - groupedSpans[0][len(groupedSpans[0])-1].EndTimestamp())
+				for i, spansGroup := range groupedSpans {
+					startEndDelta := int64(ungroupedSpan.StartTimestamp() - spansGroup[len(spansGroup)-1].EndTimestamp())
+					if startEndDelta >= 0 && (startEndDelta <= minStartEndDelta || minStartEndDelta < 0) {
 						minStartEndDelta = startEndDelta
-						spanTargetGroup = &spansGroup
+						spanTargetGroupIndex = i
 					}
 				}
-				*spanTargetGroup = append(*spanTargetGroup, ungroupedSpan)
-			} else {
+
+				if spanTargetGroupIndex != -1 {
+					groupedSpans[spanTargetGroupIndex] = append(groupedSpans[spanTargetGroupIndex], ungroupedSpan)
+				}
+			}
+
+			if spanTargetGroupIndex == -1 {
 				groupedSpans = append(groupedSpans, []ptrace.Span{ungroupedSpan})
 			}
 		}
+
 		groupedSpansByService[serviceName] = &serviceSpansGrouped{
 			serverSpan:      ungroupedSpans.serverSpan,
 			otherSpanGroups: groupedSpans,
@@ -507,7 +513,7 @@ func (p *connectorImp) getUngroupedSpansByService(traces ptrace.Traces) map[stri
 				span := spans.At(k)
 				if span.Kind() == ptrace.SpanKindServer {
 					serviceServerSpan = span
-				} else {
+				} else if span.Kind() == ptrace.SpanKindClient || span.Kind() == ptrace.SpanKindConsumer || span.Kind() == ptrace.SpanKindProducer {
 					serviceOtherSpans = append(serviceOtherSpans, span)
 				}
 			}

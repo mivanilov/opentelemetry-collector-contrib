@@ -279,9 +279,7 @@ func verifyExplicitHistogramDataPoints(t testing.TB, dps pmetric.HistogramDataPo
 // This is the best point to verify the computed metrics from spans are as expected.
 func verifyConsumeMetricsInputExcludingExternalStats(t testing.TB, input pmetric.Metrics, expectedTemporality pmetric.AggregationTemporality, numCumulativeConsumptions int, expectations *expectations) bool {
 	require.Equal(t, expectations.totalDataPointsCount, input.DataPointCount(),
-		"Should be 2 for each non ignored span: call count and latency, both split into 2 resource scopes (server and client) defined by: "+
-			"service-a: service-a (server kind) -> service-a (client kind) and "+
-			"service-b: service-b (service kind) -> service-b (client kind) -> external",
+		"Should be 2 for each non ignored span: call count and latency, for a single server resource scope",
 	)
 
 	require.Equal(t, expectations.serviceMetricsCount, input.ResourceMetrics().Len())
@@ -496,23 +494,27 @@ func buildSampleTrace() ptrace.Traces {
 
 // buildSampleTraceWithExternalCall builds the following trace:
 //
-//		service-a|/ping-a|Server ->
-//		  service-a|internal-a1|Internal ->
-//		    |
-//		    |-> service-a|/ping-b1|Client ->
-//		    |     service-b|/ping-b1|Server ->
-//		    |       service-b|/internal-b1|Internal ->
-//		    |         service-b|/ping-external1|Client ->
-//	        |
-//		    |-> service-a|/ping-b2|Client ->
-//		    |     service-b|/ping-b2|Server ->
-//		    |       service-b|/internal-b2|Internal ->
-//		    |         service-b|/ping-external2|Client ->
-//		    |
-//		    |---------> service-a|/internal-a2|Internal ->
-//		                  service-a|/ping-external3|Client ->
+// service-a perspective:
+// - internal: database, component.internal.io
+// - external: service-b.external.com, service-c.internal.com
 //
-// duration of external Client spans is excluded from the internal Client and Server spans; Internal spans are ignored.
+//		service-a|/ping|Server ->
+//		  service-a|internal|Internal -> internal
+//		    |
+//		    |-> service-a|/external-1|Client -> external
+//		    |     service-a|database-1|Client -> internal
+//		    |         service-a|/external-int-1|Client -> external
+//		    |         	service-a|/internal-1|Client -> internal
+//	        |
+//		    |-> service-a|/internal-2|Client -> internal
+//		    |     service-a|/external-2|Client -> external
+//		    |       service-a|/external-int-2|Client -> external
+//		    |         service-a|database-2|Client -> internal
+//		    |
+//		    |---------> service-a|/external-3|Client -> external
+//		                  service-a|database-3|Client -> internal
+//
+// duration of external Client spans is excluded to produce metrics that measure only internal duration (Internal spans and internal Client spans like database or other internal remote) per service.
 func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.StatusCode) ptrace.Traces {
 	traces := ptrace.NewTraces()
 
@@ -523,144 +525,144 @@ func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.Statu
 			serviceName: "service-a",
 			spans: []span{
 				{
-					name:       "/ping-a",
+					name:       "/ping",
 					kind:       ptrace.SpanKindServer,
 					statusCode: serviceSpansStatus["service-a"+ptrace.SpanKindServer.String()],
 					traceID:    [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
 					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
 					startTime:  now,
-					endTime:    now.Add(time.Duration(13) * time.Second),
+					endTime:    now.Add(time.Duration(10000) * time.Millisecond),
 				},
 				{
-					name:         "internal-a1",
+					name:         "internal",
 					kind:         ptrace.SpanKindInternal,
 					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindInternal.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
 					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					startTime:    now,
-					endTime:      now.Add(time.Duration(1) * time.Second),
+					endTime:      now.Add(time.Duration(10000) * time.Millisecond),
 				},
 				{
-					name:         "/ping-b1",
+					name:         "/external-1",
 					kind:         ptrace.SpanKindClient,
 					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
 					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x20},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(9) * time.Second),
+					startTime:    now,
+					endTime:      now.Add(time.Duration(1000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-b.internal.com",
+						"net.peer.name": "service-b.external.com",
 					},
 				},
 				{
-					name:         "/ping-b2",
+					name:         "database-1",
 					kind:         ptrace.SpanKindClient,
 					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
 					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x21},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(10) * time.Second),
-					attributes: map[string]string{
-						"net.peer.name": "service-b.internal.com",
-					},
+					startTime:    now.Add(time.Duration(1000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(4000) * time.Millisecond),
 				},
 				{
-					name:         "internal-a2",
-					kind:         ptrace.SpanKindInternal,
-					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindInternal.String()],
-					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
-					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x28},
-					startTime:    now.Add(time.Duration(10) * time.Second),
-					endTime:      now.Add(time.Duration(11) * time.Second),
-				},
-				{
-					name:         "/ping-external3",
+					name:         "/external-int-1",
 					kind:         ptrace.SpanKindClient,
 					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x28},
-					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x29},
-					startTime:    now.Add(time.Duration(11) * time.Second),
-					endTime:      now.Add(time.Duration(13) * time.Second),
-					attributes: map[string]string{
-						"net.peer.name": "some.bank3.com",
-					},
-				},
-			},
-		}, traces.ResourceSpans().AppendEmpty())
-	initServiceSpans(
-		serviceSpans{
-			serviceName: "service-b",
-			spans: []span{
-				{
-					name:         "/ping-b1",
-					kind:         ptrace.SpanKindServer,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindServer.String()],
-					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x20},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x22},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(8) * time.Second),
+					startTime:    now.Add(time.Duration(4000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(5000) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-c.internal.com",
+					},
 				},
 				{
-					name:         "/ping-b2",
-					kind:         ptrace.SpanKindServer,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindServer.String()],
+					name:         "/internal-1",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x21},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x23},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(9) * time.Second),
+					startTime:    now.Add(time.Duration(5000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(6000) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "component.internal.io",
+					},
 				},
 				{
-					name:         "internal-b1",
-					kind:         ptrace.SpanKindInternal,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindInternal.String()],
+					name:         "/internal-2",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x22},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x24},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(3) * time.Second),
+					startTime:    now,
+					endTime:      now.Add(time.Duration(3010) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "component.internal.io",
+					},
 				},
 				{
-					name:         "internal-b2",
-					kind:         ptrace.SpanKindInternal,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindInternal.String()],
+					name:         "/external-2",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x23},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x25},
-					startTime:    now.Add(time.Duration(2) * time.Second),
-					endTime:      now.Add(time.Duration(4) * time.Second),
+					startTime:    now.Add(time.Duration(3010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(4010) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-b.external.com",
+					},
 				},
 				{
-					name:         "/ping-external1",
+					name:         "/external-int-2",
 					kind:         ptrace.SpanKindClient,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindClient.String()],
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x24},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x26},
-					startTime:    now.Add(time.Duration(3) * time.Second),
-					endTime:      now.Add(time.Duration(8) * time.Second),
+					startTime:    now.Add(time.Duration(4010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(5010) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "some.bank1.com",
+						"net.peer.name": "service-c.internal.com",
 					},
 				},
 				{
-					name:         "/ping-external2",
+					name:         "database-2",
 					kind:         ptrace.SpanKindClient,
-					statusCode:   serviceSpansStatus["service-b"+ptrace.SpanKindClient.String()],
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
 					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
-					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x25},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x27},
-					startTime:    now.Add(time.Duration(4) * time.Second),
-					endTime:      now.Add(time.Duration(9) * time.Second),
+					startTime:    now.Add(time.Duration(5010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(7000) * time.Millisecond),
+				},
+				{
+					name:         "/external-3",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x28},
+					startTime:    now.Add(time.Duration(7000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(8000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "some.bank2.com",
+						"net.peer.name": "service-b.external.com",
 					},
+				},
+				{
+					name:         "database-3",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x29},
+					startTime:    now.Add(time.Duration(8000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(10000) * time.Millisecond),
 				},
 			},
 		}, traces.ResourceSpans().AppendEmpty())
@@ -898,7 +900,7 @@ func TestConcurrentShutdown(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Test
-	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, ExternalStatsExclusionConfig{})
+	p := newConnectorImp(t, new(consumertest.MetricsSink), nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, nil)
 	err := p.Start(ctx, componenttest.NewNopHost())
 	require.NoError(t, err)
 
@@ -978,7 +980,7 @@ func TestConsumeMetricsErrors(t *testing.T) {
 	}
 	mockClock := clock.NewMock(time.Now())
 	ticker := mockClock.NewTicker(time.Nanosecond)
-	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, ExternalStatsExclusionConfig{})
+	p := newConnectorImp(t, mcon, nil, explicitHistogramsConfig, disabledExemplarsConfig, cumulative, logger, ticker, nil)
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())
@@ -1140,7 +1142,7 @@ func TestConsumeTraces(t *testing.T) {
 			mockClock := clock.NewMock(time.Now())
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
-			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, ExternalStatsExclusionConfig{})
+			p := newConnectorImp(t, mcon, stringp("defaultNullValue"), tc.histogramConfig, tc.exemplarConfig, tc.aggregationTemporality, zaptest.NewLogger(t), ticker, nil)
 
 			ctx := metadata.NewIncomingContext(context.Background(), nil)
 			err := p.Start(ctx, componenttest.NewNopHost())
@@ -1185,86 +1187,44 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 				"service-aServer":   ptrace.StatusCodeOk,
 				"service-aInternal": ptrace.StatusCodeOk,
 				"service-aClient":   ptrace.StatusCodeOk,
-				"service-bServer":   ptrace.StatusCodeOk,
-				"service-bInternal": ptrace.StatusCodeOk,
-				"service-bClient":   ptrace.StatusCodeOk,
 			})},
 			expectations: &expectations{
-				totalDataPointsCount: 16,
-				serviceMetricsCount:  2,
+				totalDataPointsCount: 2,
+				serviceMetricsCount:  1,
 				serviceExpectations: map[string]serviceExpectation{
 					"service-a": {
-						metricDataPointsCount: 4,
-					},
-					"service-b": {
-						metricDataPointsCount: 4,
+						metricDataPointsCount: 1,
 					},
 				},
 				serviceSpanExpectations: map[string]serviceSpanExpectation{
-					"service-a|/ping-a|SPAN_KIND_SERVER": {
-						expectedDuration: float64(5000),
-					},
-					"service-a|/ping-b1|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(2000),
-					},
-					"service-a|/ping-b2|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(3000),
-					},
-					"service-a|/ping-external3|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(2000),
-					},
-					"service-b|/ping-b1|SPAN_KIND_SERVER": {
-						expectedDuration: float64(1000),
-					},
-					"service-b|/ping-b2|SPAN_KIND_SERVER": {
-						expectedDuration: float64(2000),
-					},
-					"service-b|/ping-external1|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
-					},
-					"service-b|/ping-external2|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
+					"service-a|/ping|SPAN_KIND_SERVER": {
+						expectedDuration: float64(7000),
 					},
 				},
 			},
 		},
 		{
-			name:                   "Test single consumption (Cumulative), 1 span ok and the other spans error.",
+			name:                   "Test single consumption (Cumulative), Server span ok and Client spans error.",
 			aggregationTemporality: cumulative,
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
 			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
 				"service-aServer":   ptrace.StatusCodeOk,
-				"service-aInternal": ptrace.StatusCodeError,
+				"service-aInternal": ptrace.StatusCodeOk,
 				"service-aClient":   ptrace.StatusCodeError,
-				"service-bServer":   ptrace.StatusCodeError,
-				"service-bInternal": ptrace.StatusCodeError,
-				"service-bClient":   ptrace.StatusCodeError,
 			})},
 			expectations: &expectations{
-				totalDataPointsCount: 8,
-				serviceMetricsCount:  2,
+				totalDataPointsCount: 2,
+				serviceMetricsCount:  1,
 				serviceExpectations: map[string]serviceExpectation{
 					"service-a": {
-						metricDataPointsCount: 2,
-					},
-					"service-b": {
-						metricDataPointsCount: 2,
+						metricDataPointsCount: 1,
 					},
 				},
 				serviceSpanExpectations: map[string]serviceSpanExpectation{
-					"service-a|/ping-a|SPAN_KIND_SERVER": {
-						expectedDuration: float64(5000),
-					},
-					"service-a|/ping-external3|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(2000),
-					},
-					"service-b|/ping-external1|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
-					},
-					"service-b|/ping-external2|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
+					"service-a|/ping|SPAN_KIND_SERVER": {
+						expectedDuration: float64(7000),
 					},
 				},
 			},
@@ -1279,30 +1239,13 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 				"service-aServer":   ptrace.StatusCodeError,
 				"service-aInternal": ptrace.StatusCodeError,
 				"service-aClient":   ptrace.StatusCodeError,
-				"service-bServer":   ptrace.StatusCodeError,
-				"service-bInternal": ptrace.StatusCodeError,
-				"service-bClient":   ptrace.StatusCodeError,
 			})},
 			expectations: &expectations{
-				totalDataPointsCount: 6,
-				serviceMetricsCount:  2,
+				totalDataPointsCount: 0,
+				serviceMetricsCount:  1,
 				serviceExpectations: map[string]serviceExpectation{
 					"service-a": {
-						metricDataPointsCount: 1,
-					},
-					"service-b": {
-						metricDataPointsCount: 2,
-					},
-				},
-				serviceSpanExpectations: map[string]serviceSpanExpectation{
-					"service-a|/ping-external3|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(2000),
-					},
-					"service-b|/ping-external1|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
-					},
-					"service-b|/ping-external2|SPAN_KIND_CLIENT": {
-						expectedDuration: float64(5000),
+						metricDataPointsCount: 0,
 					},
 				},
 			},
@@ -1321,11 +1264,10 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			mockClock := clock.NewMock(time.Now())
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
-			externalStatsExclusionConfig := ExternalStatsExclusionConfig{
-				ExternallyFacingServices: []string{"service-a", "service-b"},
+			externalStatsExclusionConfig := &ExternalStatsExclusionConfig{
 				HostAttribute: &HostAttributeConfig{
 					AttributeName:       "net.peer.name",
-					InternalHostPattern: ".*internal.com",
+					InternalHostPattern: ".*internal.io",
 				},
 			}
 
@@ -1355,7 +1297,7 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 func TestMetricKeyCache(t *testing.T) {
 	mcon := consumertest.NewNop()
 
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, ExternalStatsExclusionConfig{})
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, nil)
 	traces := buildSampleTrace()
 
 	// Test
@@ -1386,7 +1328,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 	// Prepare
 	mcon := consumertest.NewNop()
 
-	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil, ExternalStatsExclusionConfig{})
+	conn := newConnectorImp(nil, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(b), nil, nil)
 
 	traces := buildSampleTrace()
 
@@ -1400,7 +1342,7 @@ func BenchmarkConnectorConsumeTraces(b *testing.B) {
 func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 	mcon := consumertest.NewNop()
 	excludeDimensions := []string{"span.kind", "span.name", "totallyWrongNameDoesNotAffectAnything"}
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, ExternalStatsExclusionConfig{}, excludeDimensions...)
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), nil, nil, excludeDimensions...)
 	traces := buildSampleTrace()
 
 	// Test
@@ -1449,7 +1391,7 @@ func TestExcludeDimensionsConsumeTraces(t *testing.T) {
 
 }
 
-func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, externalStatsExclusion ExternalStatsExclusionConfig, excludedDimensions ...string) *connectorImp {
+func newConnectorImp(t *testing.T, mcon consumer.Metrics, defaultNullValue *string, histogramConfig func() HistogramConfig, exemplarsConfig func() ExemplarsConfig, temporality string, logger *zap.Logger, ticker *clock.Ticker, externalStatsExclusion *ExternalStatsExclusionConfig, excludedDimensions ...string) *connectorImp {
 	cfg := &Config{
 		AggregationTemporality: temporality,
 		Histogram:              histogramConfig(),
@@ -1567,7 +1509,7 @@ func TestConnectorConsumeTracesEvictedCacheKey(t *testing.T) {
 	ticker := mockClock.NewTicker(time.Nanosecond)
 
 	// Note: default dimension key cache size is 2.
-	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker, ExternalStatsExclusionConfig{})
+	p := newConnectorImp(t, mcon, stringp("defaultNullValue"), explicitHistogramsConfig, disabledExemplarsConfig, cumulative, zaptest.NewLogger(t), ticker, nil)
 
 	ctx := metadata.NewIncomingContext(context.Background(), nil)
 	err := p.Start(ctx, componenttest.NewNopHost())
