@@ -83,7 +83,7 @@ type dimension struct {
 }
 
 type serviceSpansUngrouped struct {
-	serverSpan ptrace.Span
+	serverSpan *ptrace.Span
 	otherSpans []ptrace.Span
 }
 
@@ -457,6 +457,11 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 	var groupedSpansByService = make(map[string]*serviceSpansGrouped)
 
 	for serviceName, ungroupedSpans := range ungroupedSpansByService {
+		if ungroupedSpans.serverSpan == nil {
+			p.sugaredLogger.Warnf("Service=%s trace server span missing!", serviceName)
+			continue
+		}
+
 		sort.Slice(ungroupedSpans.otherSpans, func(i, j int) bool {
 			return ungroupedSpans.otherSpans[i].StartTimestamp() < ungroupedSpans.otherSpans[j].StartTimestamp()
 		})
@@ -485,7 +490,7 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 		}
 
 		groupedSpansByService[serviceName] = &serviceSpansGrouped{
-			serverSpan:      ungroupedSpans.serverSpan,
+			serverSpan:      *ungroupedSpans.serverSpan,
 			otherSpanGroups: groupedSpans,
 		}
 	}
@@ -504,7 +509,7 @@ func (p *connectorImp) getUngroupedSpansByService(traces ptrace.Traces) map[stri
 			continue
 		}
 
-		var serviceServerSpan ptrace.Span
+		var serviceServerSpan *ptrace.Span
 		var serviceOtherSpans []ptrace.Span
 		ilsSlice := rspans.ScopeSpans()
 		for j := 0; j < ilsSlice.Len(); j++ {
@@ -512,7 +517,7 @@ func (p *connectorImp) getUngroupedSpansByService(traces ptrace.Traces) map[stri
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
 				if span.Kind() == ptrace.SpanKindServer {
-					serviceServerSpan = span
+					serviceServerSpan = &span
 				} else if span.Kind() == ptrace.SpanKindClient || span.Kind() == ptrace.SpanKindConsumer || span.Kind() == ptrace.SpanKindProducer {
 					serviceOtherSpans = append(serviceOtherSpans, span)
 				}
@@ -525,6 +530,9 @@ func (p *connectorImp) getUngroupedSpansByService(traces ptrace.Traces) map[stri
 				otherSpans: serviceOtherSpans,
 			}
 		} else {
+			if ungroupedSpansByService[serviceAttr.Str()].serverSpan == nil {
+				ungroupedSpansByService[serviceAttr.Str()].serverSpan = serviceServerSpan
+			}
 			ungroupedSpansByService[serviceAttr.Str()].otherSpans = append(ungroupedSpansByService[serviceAttr.Str()].otherSpans, serviceOtherSpans...)
 		}
 	}
