@@ -92,7 +92,7 @@ func (c *HostAttributeConfig) compileRegex() error {
 	return nil
 }
 
-func (c *HostAttributeConfig) matchHost(host string) bool {
+func (c *HostAttributeConfig) matchInternalHost(host string) bool {
 	if c.regexPattern == nil {
 		err := c.compileRegex()
 		if err != nil {
@@ -109,7 +109,7 @@ func (c *HostAttributeConfig) SpanIsExternal(span ptrace.Span) bool {
 		return false
 	}
 	host := hostAttr.AsString()
-	return c.matchHost(host)
+	return !c.matchInternalHost(host)
 }
 
 type HistogramConfig struct {
