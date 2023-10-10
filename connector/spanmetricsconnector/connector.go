@@ -6,7 +6,6 @@ package spanmetricsconnector // import "github.com/open-telemetry/opentelemetry-
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"regexp"
 	"sort"
 	"sync"
@@ -449,18 +448,6 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 			hasExternalSpansWithError: hasExternalSpansWithError,
 			internalDurationTotal:     internalDurationTotal,
 		}
-
-		if p.config.ExternalStatsExclusion.LogDebugInfo {
-			unitDivider := unitDivider(p.config.Histogram.Unit)
-			fmt.Printf("\nService=%s Server Span details: \n"+
-				"Total duration: %f %s \n"+
-				"Internal duration: %f %s \n"+
-				"Has external spans with error: %t \n",
-				serviceName,
-				float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
-				internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
-				hasExternalSpansWithError)
-		}
 	}
 
 	return serverSpanDetailsByService
@@ -495,10 +482,6 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 				if spanTargetGroupIndex != -1 {
 					groupedSpans[spanTargetGroupIndex] = append(groupedSpans[spanTargetGroupIndex], ungroupedSpan)
 				}
-
-				if p.config.ExternalStatsExclusion.LogDebugInfo {
-					fmt.Printf("Service=%s ungrouped spanId=%s minStartEndDelta=%d ns \n", serviceName, ungroupedSpan.SpanID(), minStartEndDelta)
-				}
 			}
 
 			if spanTargetGroupIndex == -1 {
@@ -509,19 +492,6 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 		groupedSpansByService[serviceName] = &serviceSpansGrouped{
 			serverSpan:      *ungroupedSpans.serverSpan,
 			otherSpanGroups: groupedSpans,
-		}
-
-		if p.config.ExternalStatsExclusion.LogDebugInfo {
-			fmt.Printf("\nService=%s grouped spans: \n", serviceName)
-			for _, _serviceSpansGrouped := range groupedSpansByService {
-				fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", _serviceSpansGrouped.serverSpan.Kind(), _serviceSpansGrouped.serverSpan.TraceID(), _serviceSpansGrouped.serverSpan.SpanID(), _serviceSpansGrouped.serverSpan.ParentSpanID(), _serviceSpansGrouped.serverSpan.Attributes().AsRaw())
-				for i, otherSpansGroup := range _serviceSpansGrouped.otherSpanGroups {
-					fmt.Printf("Other Spans Group %d: \n", i)
-					for _, otherSpans := range otherSpansGroup {
-						fmt.Printf("Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.Attributes().AsRaw())
-					}
-				}
-			}
 		}
 	}
 

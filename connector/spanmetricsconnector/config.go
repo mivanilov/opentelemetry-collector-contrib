@@ -6,6 +6,8 @@ package spanmetricsconnector // import "github.com/open-telemetry/opentelemetry-
 import (
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"regexp"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -70,6 +72,44 @@ type ExternalStatsExclusionConfig struct {
 type HostAttributeConfig struct {
 	AttributeName       string `mapstructure:"attribute_name"`
 	InternalHostPattern string `mapstructure:"internal_host_pattern"`
+	regexPattern        *regexp.Regexp
+	regexCompileErr     error
+}
+
+func (c *HostAttributeConfig) compileRegex() error {
+	if c.regexPattern != nil {
+		return c.regexCompileErr
+	}
+	if c.InternalHostPattern == "" {
+		return nil
+	}
+	regex, err := regexp.Compile(c.InternalHostPattern)
+	if err != nil {
+		c.regexCompileErr = fmt.Errorf("error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex: %w", err)
+		return c.regexCompileErr
+	}
+	c.regexPattern = regex
+	return nil
+}
+
+func (c *HostAttributeConfig) matchHost(host string) bool {
+	if c.regexPattern == nil {
+		err := c.compileRegex()
+		if err != nil {
+			return false
+		}
+	}
+
+	return c.regexPattern.MatchString(host)
+}
+
+func (c *HostAttributeConfig) SpanIsExternal(span ptrace.Span) bool {
+	hostAttr, ok := span.Attributes().Get(c.AttributeName)
+	if !ok {
+		return false
+	}
+	host := hostAttr.AsString()
+	return c.matchHost(host)
 }
 
 type HistogramConfig struct {
