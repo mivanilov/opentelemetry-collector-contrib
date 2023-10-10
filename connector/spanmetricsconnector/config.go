@@ -64,6 +64,7 @@ type Config struct {
 
 type ExternalStatsExclusionConfig struct {
 	HostAttribute *HostAttributeConfig `mapstructure:"host_attribute"`
+	LogDebugInfo  bool                 `mapstructure:"log_debug_info"`
 }
 
 type HostAttributeConfig struct {
