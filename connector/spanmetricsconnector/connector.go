@@ -6,8 +6,9 @@ package spanmetricsconnector // import "github.com/open-telemetry/opentelemetry-
 import (
 	"bytes"
 	"context"
-	"regexp"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 	metricNameCalls    = "calls"
 
 	defaultUnit = metrics.Milliseconds
+	lineLength  = 120
 )
 
 type connectorImp struct {
@@ -402,17 +404,80 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 	}
 }
 
+func getSpanDuration(span ptrace.Span) float64 {
+	return float64(span.EndTimestamp() - span.StartTimestamp())
+}
+
+func logSpansVisual(serviceSpanGroups *serviceSpansGrouped) {
+	dashes := ""
+	serverSpanStr := ""
+	serverAttributes := serviceSpanGroups.serverSpan.Attributes()
+	serverSpanName, found := serverAttributes.Get("http.url")
+	if found {
+		serverSpanStr += strings.Split(serverSpanName.AsString(), "//")[1]
+	}
+	for i := 0; i < lineLength; i++ {
+		if i < len(serverSpanStr) {
+			dashes += string(serverSpanStr[i])
+		} else {
+			dashes += "-"
+		}
+	}
+	fmt.Println(dashes)
+
+	var spansVisual string
+	for _, spansGroup := range serviceSpanGroups.otherSpanGroups {
+		serverDuration := getSpanDuration(serviceSpanGroups.serverSpan)
+		curLine := ""
+		for _, span := range spansGroup {
+			spanDuration := getSpanDuration(span)
+			spanStartFraction := float64(span.StartTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp()) / serverDuration
+			spanDurationFraction := spanDuration / serverDuration
+			lineLocation := int(spanStartFraction * lineLength)
+			numSpacesToAdd := lineLocation - len(curLine)
+			for i := 0; i < numSpacesToAdd; i++ {
+				curLine += " "
+			}
+			curLine += spanStr(span, spanDurationFraction)
+		}
+		spansVisual += curLine + "\n"
+	}
+	fmt.Println(spansVisual)
+
+}
+
+func spanStr(span ptrace.Span, spanDurationFraction float64) string {
+	output := ""
+	var spanName string
+	url, found := span.Attributes().Get("http.url")
+	if found {
+		spanName = strings.Split(url.AsString(), "//")[1]
+	} else {
+		spanName = span.Name()
+	}
+	for i := 0; i < int(spanDurationFraction*lineLength); i++ {
+		if i < len(spanName) {
+			output += string(spanName[i])
+		} else {
+			output += "="
+		}
+	}
+	return output + " "
+}
+
 func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[string]*serviceServerSpanDetails {
-	// TODO move regexp compile to the factory, so that it's compiled only once on startup
-	internalHostPatternRegex, err := regexp.Compile(p.config.ExternalStatsExclusion.HostAttribute.InternalHostPattern)
+	err := p.config.ExternalStatsExclusion.HostAttribute.compileRegex()
 	if err != nil {
-		p.logger.Error("Error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex:", zap.Error(err))
+		p.logger.Error("unable to extract external traces", zap.Error(err))
 		return make(map[string]*serviceServerSpanDetails)
 	}
 
 	var serverSpanDetailsByService = make(map[string]*serviceServerSpanDetails)
 
 	for serviceName, serviceSpanGroups := range p.getGroupedSpansByService(p.getUngroupedSpansByService(traces)) {
+		if p.config.ExternalStatsExclusion.LogDebugInfo {
+			logSpansVisual(serviceSpanGroups)
+		}
 		var hasExternalSpansWithError = false
 		var internalDuration = customDuration{
 			startTimestamp: 0,
@@ -423,15 +488,12 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 			var externalSpans []ptrace.Span
 
 			for _, span := range spansGroup {
-				hostAttr, hostAttrOk := span.Attributes().Get(p.config.ExternalStatsExclusion.HostAttribute.AttributeName)
-				if hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
-					// external span
+				if p.config.ExternalStatsExclusion.HostAttribute.SpanIsExternal(span) {
 					if span.Status().Code() == ptrace.StatusCodeError {
 						hasExternalSpansWithError = true
 					}
 					externalSpans = append(externalSpans, span)
 				} else {
-					// internal span
 					internalDuration = p.calcInternalDuration(span, externalSpans, internalDuration)
 				}
 			}
@@ -447,6 +509,18 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 		serverSpanDetailsByService[serviceName] = &serviceServerSpanDetails{
 			hasExternalSpansWithError: hasExternalSpansWithError,
 			internalDurationTotal:     internalDurationTotal,
+		}
+
+		if p.config.ExternalStatsExclusion.LogDebugInfo {
+			unitDivider := unitDivider(p.config.Histogram.Unit)
+			fmt.Printf("\nService=%s Server Span details: \n"+
+				"Total duration: %f %s \n"+
+				"Internal duration: %f %s \n"+
+				"Has external spans with error: %t \n",
+				serviceName,
+				float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+				internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
+				hasExternalSpansWithError)
 		}
 	}
 
@@ -482,6 +556,10 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 				if spanTargetGroupIndex != -1 {
 					groupedSpans[spanTargetGroupIndex] = append(groupedSpans[spanTargetGroupIndex], ungroupedSpan)
 				}
+
+				if p.config.ExternalStatsExclusion.LogDebugInfo {
+					fmt.Printf("Service=%s ungrouped spanId=%s minStartEndDelta=%d ns \n", serviceName, ungroupedSpan.SpanID(), minStartEndDelta)
+				}
 			}
 
 			if spanTargetGroupIndex == -1 {
@@ -492,6 +570,19 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 		groupedSpansByService[serviceName] = &serviceSpansGrouped{
 			serverSpan:      *ungroupedSpans.serverSpan,
 			otherSpanGroups: groupedSpans,
+		}
+
+		if p.config.ExternalStatsExclusion.LogDebugInfo {
+			fmt.Printf("\nService=%s grouped spans: \n", serviceName)
+			for _, _serviceSpansGrouped := range groupedSpansByService {
+				fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", _serviceSpansGrouped.serverSpan.Kind(), _serviceSpansGrouped.serverSpan.TraceID(), _serviceSpansGrouped.serverSpan.SpanID(), _serviceSpansGrouped.serverSpan.ParentSpanID(), _serviceSpansGrouped.serverSpan.Attributes().AsRaw())
+				for i, otherSpansGroup := range _serviceSpansGrouped.otherSpanGroups {
+					fmt.Printf("Other Spans Group %d: \n", i)
+					for _, otherSpans := range otherSpansGroup {
+						fmt.Printf("Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.Attributes().AsRaw())
+					}
+				}
+			}
 		}
 	}
 
