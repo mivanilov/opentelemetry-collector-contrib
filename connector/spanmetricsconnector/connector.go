@@ -7,8 +7,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +41,7 @@ const (
 	metricNameCalls    = "calls"
 
 	defaultUnit = metrics.Milliseconds
+	lineLength  = 120
 )
 
 type connectorImp struct {
@@ -403,17 +404,80 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 	}
 }
 
+func getSpanDuration(span ptrace.Span) float64 {
+	return float64(span.EndTimestamp() - span.StartTimestamp())
+}
+
+func logSpansVisual(serviceSpanGroups *serviceSpansGrouped) {
+	dashes := ""
+	serverSpanStr := ""
+	serverAttributes := serviceSpanGroups.serverSpan.Attributes()
+	serverSpanName, found := serverAttributes.Get("http.url")
+	if found {
+		serverSpanStr += strings.Split(serverSpanName.AsString(), "//")[1]
+	}
+	for i := 0; i < lineLength; i++ {
+		if i < len(serverSpanStr) {
+			dashes += string(serverSpanStr[i])
+		} else {
+			dashes += "-"
+		}
+	}
+	fmt.Println(dashes)
+
+	var spansVisual string
+	for _, spansGroup := range serviceSpanGroups.otherSpanGroups {
+		serverDuration := getSpanDuration(serviceSpanGroups.serverSpan)
+		curLine := ""
+		for _, span := range spansGroup {
+			spanDuration := getSpanDuration(span)
+			spanStartFraction := float64(span.StartTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp()) / serverDuration
+			spanDurationFraction := spanDuration / serverDuration
+			lineLocation := int(spanStartFraction * lineLength)
+			numSpacesToAdd := lineLocation - len(curLine)
+			for i := 0; i < numSpacesToAdd; i++ {
+				curLine += " "
+			}
+			curLine += spanStr(span, spanDurationFraction)
+		}
+		spansVisual += curLine + "\n"
+	}
+	fmt.Println(spansVisual)
+
+}
+
+func spanStr(span ptrace.Span, spanDurationFraction float64) string {
+	output := ""
+	var spanName string
+	url, found := span.Attributes().Get("http.url")
+	if found {
+		spanName = strings.Split(url.AsString(), "//")[1]
+	} else {
+		spanName = span.Name()
+	}
+	for i := 0; i < int(spanDurationFraction*lineLength); i++ {
+		if i < len(spanName) {
+			output += string(spanName[i])
+		} else {
+			output += "="
+		}
+	}
+	return output + " "
+}
+
 func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[string]*serviceServerSpanDetails {
-	// TODO move regexp compile to the factory, so that it's compiled only once on startup
-	internalHostPatternRegex, err := regexp.Compile(p.config.ExternalStatsExclusion.HostAttribute.InternalHostPattern)
+	err := p.config.ExternalStatsExclusion.HostAttribute.compileRegex()
 	if err != nil {
-		p.logger.Error("Error compiling config.ExternalStatsExclusion.HostAttribute.InternalHostPattern regex:", zap.Error(err))
+		p.logger.Error("unable to extract external traces", zap.Error(err))
 		return make(map[string]*serviceServerSpanDetails)
 	}
 
 	var serverSpanDetailsByService = make(map[string]*serviceServerSpanDetails)
 
 	for serviceName, serviceSpanGroups := range p.getGroupedSpansByService(p.getUngroupedSpansByService(traces)) {
+		if p.config.ExternalStatsExclusion.LogDebugInfo {
+			logSpansVisual(serviceSpanGroups)
+		}
 		var hasExternalSpansWithError = false
 		var internalDuration = customDuration{
 			startTimestamp: 0,
@@ -424,15 +488,12 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 			var externalSpans []ptrace.Span
 
 			for _, span := range spansGroup {
-				hostAttr, hostAttrOk := span.Attributes().Get(p.config.ExternalStatsExclusion.HostAttribute.AttributeName)
-				if hostAttrOk && !internalHostPatternRegex.MatchString(hostAttr.AsString()) {
-					// external span
+				if p.config.ExternalStatsExclusion.HostAttribute.SpanIsExternal(span) {
 					if span.Status().Code() == ptrace.StatusCodeError {
 						hasExternalSpansWithError = true
 					}
 					externalSpans = append(externalSpans, span)
 				} else {
-					// internal span
 					internalDuration = p.calcInternalDuration(span, externalSpans, internalDuration)
 				}
 			}
