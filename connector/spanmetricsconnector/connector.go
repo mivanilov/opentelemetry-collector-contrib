@@ -441,8 +441,8 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 		var internalDurationTotal = float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
 		serverSpanDurationTotal := float64(serviceSpanGroups.serverSpan.EndTimestamp() - serviceSpanGroups.serverSpan.StartTimestamp())
 		if serverSpanDurationTotal < internalDurationTotal {
-			internalDurationTotal = serverSpanDurationTotal
 			p.sugaredLogger.Warnf("Service=%s traceId=%s calculated total_internal_duration=%f is more than server_span_duration=%f!", serviceName, serviceSpanGroups.serverSpan.TraceID(), internalDurationTotal, serverSpanDurationTotal)
+			internalDurationTotal = serverSpanDurationTotal
 		}
 
 		serverSpanDetailsByService[serviceName] = &serviceServerSpanDetails{
