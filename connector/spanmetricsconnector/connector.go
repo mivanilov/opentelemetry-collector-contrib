@@ -409,7 +409,7 @@ func getSpanDuration(span ptrace.Span) float64 {
 }
 
 func logSpansVisual(serviceSpanGroups *serviceSpansGrouped) {
-	dashes := ""
+	dashes := "\n"
 	serverSpanStr := ""
 	serverAttributes := serviceSpanGroups.serverSpan.Attributes()
 	serverSpanName, found := serverAttributes.Get("http.url")
@@ -442,7 +442,7 @@ func logSpansVisual(serviceSpanGroups *serviceSpansGrouped) {
 		}
 		spansVisual += curLine + "\n"
 	}
-	fmt.Println(spansVisual)
+	fmt.Print(spansVisual)
 
 }
 
@@ -475,9 +475,6 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 	var serverSpanDetailsByService = make(map[string]*serviceServerSpanDetails)
 
 	for serviceName, serviceSpanGroups := range p.getGroupedSpansByService(p.getUngroupedSpansByService(traces)) {
-		if p.config.ExternalStatsExclusion.LogDebugInfo {
-			logSpansVisual(serviceSpanGroups)
-		}
 		var hasExternalSpansWithError = false
 		var internalDuration = customDuration{
 			startTimestamp: 0,
@@ -501,8 +498,7 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 
 		var internalDurationTotal = float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
 		serverSpanDurationTotal := float64(serviceSpanGroups.serverSpan.EndTimestamp() - serviceSpanGroups.serverSpan.StartTimestamp())
-		if serverSpanDurationTotal < internalDurationTotal {
-			p.sugaredLogger.Warnf("Service=%s traceId=%s calculated total_internal_duration=%f is more than server_span_duration=%f!", serviceName, serviceSpanGroups.serverSpan.TraceID(), internalDurationTotal, serverSpanDurationTotal)
+		if internalDurationTotal > serverSpanDurationTotal {
 			internalDurationTotal = serverSpanDurationTotal
 		}
 
@@ -511,20 +507,41 @@ func (p *connectorImp) getServerSpanDetailsByService(traces ptrace.Traces) map[s
 			internalDurationTotal:     internalDurationTotal,
 		}
 
-		if p.config.ExternalStatsExclusion.LogDebugInfo {
-			unitDivider := unitDivider(p.config.Histogram.Unit)
-			fmt.Printf("\nService=%s Server Span details: \n"+
-				"Total duration: %f %s \n"+
-				"Internal duration: %f %s \n"+
-				"Has external spans with error: %t \n",
-				serviceName,
-				float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
-				internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
-				hasExternalSpansWithError)
-		}
+		p.logDiagnostics(serviceSpanGroups, internalDuration, serviceName, hasExternalSpansWithError)
 	}
 
 	return serverSpanDetailsByService
+}
+
+func (p *connectorImp) logDiagnostics(serviceSpanGroups *serviceSpansGrouped, internalDuration customDuration, serviceName string, hasExternalSpansWithError bool) {
+	internalDurationTotal := float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
+
+	if p.config.ExternalStatsExclusion.LogDebugInfo {
+		logSpansVisual(serviceSpanGroups)
+
+		unitDivider := unitDivider(p.config.Histogram.Unit)
+		fmt.Printf("\nService=%s Server Span details: \n"+
+			"Total duration: %f %s \n"+
+			"Internal duration: %f %s \n"+
+			"Has external spans with error: %t \n",
+			serviceName,
+			float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
+			hasExternalSpansWithError)
+	}
+
+	serverSpanDurationTotal := float64(serviceSpanGroups.serverSpan.EndTimestamp() - serviceSpanGroups.serverSpan.StartTimestamp())
+	if internalDurationTotal > serverSpanDurationTotal {
+		unitDivider := unitDivider(p.config.Histogram.Unit)
+		fmt.Println("\n!!!!!!! Begin: calculated internal duration > server span duration !!!!!!!")
+		fmt.Printf("Service=%s traceId=%s calculated total_internal_duration=%f%s is more than server_span_duration=%f%s!",
+			serviceName, serviceSpanGroups.serverSpan.TraceID(),
+			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
+			serverSpanDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String())
+		logSpansVisual(serviceSpanGroups)
+		fmt.Println("!!!!!!! End: calculated internal duration > server span duration !!!!!!!")
+		fmt.Println()
+	}
 }
 
 func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[string]*serviceSpansUngrouped) map[string]*serviceSpansGrouped {
