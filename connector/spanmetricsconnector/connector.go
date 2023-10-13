@@ -443,7 +443,6 @@ func logSpansVisual(serviceSpanGroups *serviceSpansGrouped) {
 		spansVisual += curLine + "\n"
 	}
 	fmt.Print(spansVisual)
-
 }
 
 func spanStr(span ptrace.Span, spanDurationFraction float64) string {
@@ -532,13 +531,17 @@ func (p *connectorImp) logDiagnostics(serviceSpanGroups *serviceSpansGrouped, in
 
 	serverSpanDurationTotal := float64(serviceSpanGroups.serverSpan.EndTimestamp() - serviceSpanGroups.serverSpan.StartTimestamp())
 	if internalDurationTotal > serverSpanDurationTotal {
+		url, found := serviceSpanGroups.serverSpan.Attributes().Get("http.url")
+		urlStr := ""
+		if found {
+			urlStr = url.AsString()
+		}
 		unitDivider := unitDivider(p.config.Histogram.Unit)
 		fmt.Println("\n!!!!!!! Begin: calculated internal duration > server span duration !!!!!!!")
-		fmt.Printf("Service=%s traceId=%s calculated total_internal_duration=%f%s is more than server_span_duration=%f%s!",
-			serviceName, serviceSpanGroups.serverSpan.TraceID(),
+		fmt.Printf("Service=%s traceId=%s httpRoute=%s otherSpanGroupsCount=%d calculated total_internal_duration=%f%s is more than server_span_duration=%f%s!",
+			serviceName, serviceSpanGroups.serverSpan.TraceID(), urlStr, len(serviceSpanGroups.otherSpanGroups),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			serverSpanDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String())
-		logSpansVisual(serviceSpanGroups)
 		fmt.Println("!!!!!!! End: calculated internal duration > server span duration !!!!!!!")
 		fmt.Println()
 	}
