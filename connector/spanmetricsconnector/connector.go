@@ -542,6 +542,16 @@ func (p *connectorImp) logDiagnostics(serviceSpanGroups *serviceSpansGrouped, in
 			serviceName, serviceSpanGroups.serverSpan.TraceID(), urlStr, len(serviceSpanGroups.otherSpanGroups),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			serverSpanDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String())
+		fmt.Printf("\nService=%s grouped spans: \n", serviceName)
+		fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+			serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(), serviceSpanGroups.serverSpan.StartTimestamp().String(), serviceSpanGroups.serverSpan.EndTimestamp().String(), serviceSpanGroups.serverSpan.Attributes().AsRaw())
+		for i, otherSpansGroup := range serviceSpanGroups.otherSpanGroups {
+			fmt.Printf("Other Spans Group %d: \n", i)
+			for _, otherSpans := range otherSpansGroup {
+				fmt.Printf("Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+					otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.StartTimestamp().String(), otherSpans.EndTimestamp().String(), otherSpans.Attributes().AsRaw())
+			}
+		}
 		fmt.Println("!!!!!!! End: calculated internal duration > server span duration !!!!!!!")
 		fmt.Println()
 	}
@@ -590,19 +600,6 @@ func (p *connectorImp) getGroupedSpansByService(ungroupedSpansByService map[stri
 		groupedSpansByService[serviceName] = &serviceSpansGrouped{
 			serverSpan:      *ungroupedSpans.serverSpan,
 			otherSpanGroups: groupedSpans,
-		}
-
-		if p.config.ExternalStatsExclusion.LogDebugInfo {
-			fmt.Printf("\nService=%s grouped spans: \n", serviceName)
-			for _, _serviceSpansGrouped := range groupedSpansByService {
-				fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", _serviceSpansGrouped.serverSpan.Kind(), _serviceSpansGrouped.serverSpan.TraceID(), _serviceSpansGrouped.serverSpan.SpanID(), _serviceSpansGrouped.serverSpan.ParentSpanID(), _serviceSpansGrouped.serverSpan.Attributes().AsRaw())
-				for i, otherSpansGroup := range _serviceSpansGrouped.otherSpanGroups {
-					fmt.Printf("Other Spans Group %d: \n", i)
-					for _, otherSpans := range otherSpansGroup {
-						fmt.Printf("Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Attributes=%v \n", otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.Attributes().AsRaw())
-					}
-				}
-			}
 		}
 	}
 
