@@ -1265,6 +1265,10 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
 			externalStatsExclusionConfig := &ExternalStatsExclusionConfig{
+				LogDebugInfo: &LogDebugInfoConfig{
+					Enabled:        false,
+					RoutesToIgnore: []string{},
+				},
 				HostAttribute: &HostAttributeConfig{
 					AttributeName:       "net.peer.name",
 					InternalHostPattern: ".*internal.io",

@@ -478,7 +478,7 @@ func (p *connectorImp) getGroupedSpansByServiceTrace(ungroupedSpansByServiceTrac
 					groupedSpans[spanTargetGroupIndex] = append(groupedSpans[spanTargetGroupIndex], ungroupedSpan)
 				}
 
-				if p.config.ExternalStatsExclusion.LogDebugInfo {
+				if p.config.ExternalStatsExclusion.LogDebugInfo.Enabled {
 					fmt.Printf("ServiceTraceKey=%s ungrouped spanId=%s minStartEndDelta=%d ns \n", serviceTraceKey, ungroupedSpan.SpanID(), minStartEndDelta)
 				}
 			}
@@ -682,15 +682,15 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 		internalDurationTotal = serverSpanDurationTotal
 	}
 
-	if p.config.ExternalStatsExclusion.LogDebugInfo {
-		urlStr := getSpanAttribute(serviceTraceSpanGroups.serverSpan, "http.url")
+	if p.config.ExternalStatsExclusion.LogDebugInfo.Enabled && !p.skipLogDebugInfo(serviceTraceSpanGroups.serverSpan) {
+		url := getSpanAttribute(serviceTraceSpanGroups.serverSpan, "http.url")
 		unitDivider := unitDivider(p.config.Histogram.Unit)
 		fmt.Println("\n!!!!!!! Begin: calculated internal metrics debug info !!!!!!!")
 		fmt.Printf("ServiceTraceKey=%s httpRoute=%s otherSpanGroupsCount=%d, server span details: \n"+
 			"Total duration: %f %s \n"+
 			"Internal duration: %f %s \n"+
 			"Has external spans with error: %t \n",
-			serviceTraceKey, urlStr, len(serviceTraceSpanGroups.otherSpanGroups),
+			serviceTraceKey, url, len(serviceTraceSpanGroups.otherSpanGroups),
 			float64(serviceTraceSpanGroups.serverSpan.EndTimestamp()-serviceTraceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			hasExternalSpansWithError)
@@ -701,19 +701,24 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 	}
 
 	if internalDurationTotal > serverSpanDurationTotal {
-		urlStr := getSpanAttribute(serviceTraceSpanGroups.serverSpan, "http.url")
+		url := getSpanAttribute(serviceTraceSpanGroups.serverSpan, "http.url")
 		unitDivider := unitDivider(p.config.Histogram.Unit)
 		fmt.Println("\n!!!!!!! Begin: calculated internal duration > server span duration !!!!!!!")
 		fmt.Printf("ServiceTraceKey=%s httpRoute=%s otherSpanGroupsCount=%d calculated total_internal_duration=%f%s is more than server_span_duration=%f%s!",
-			serviceTraceKey, urlStr, len(serviceTraceSpanGroups.otherSpanGroups),
+			serviceTraceKey, url, len(serviceTraceSpanGroups.otherSpanGroups),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			serverSpanDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String())
-		if !p.config.ExternalStatsExclusion.LogDebugInfo {
+		if !p.config.ExternalStatsExclusion.LogDebugInfo.Enabled {
 			logSpanGroups(serviceTraceSpanGroups)
 		}
 		fmt.Println("!!!!!!! End: calculated internal duration > server span duration !!!!!!!")
 		fmt.Println()
 	}
+}
+
+func (p *connectorImp) skipLogDebugInfo(span ptrace.Span) bool {
+	return contains(p.config.ExternalStatsExclusion.LogDebugInfo.RoutesToIgnore, getSpanAttribute(span, "http.route")) ||
+		contains(p.config.ExternalStatsExclusion.LogDebugInfo.RoutesToIgnore, getSpanAttribute(span, "http.target"))
 }
 
 func (p *connectorImp) addExemplar(span ptrace.Span, duration float64, h metrics.Histogram) {

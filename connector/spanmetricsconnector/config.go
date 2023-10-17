@@ -66,7 +66,7 @@ type Config struct {
 
 type ExternalStatsExclusionConfig struct {
 	HostAttribute *HostAttributeConfig `mapstructure:"host_attribute"`
-	LogDebugInfo  bool                 `mapstructure:"log_debug_info"`
+	LogDebugInfo  *LogDebugInfoConfig  `mapstructure:"log_debug_info"`
 }
 
 type HostAttributeConfig struct {
@@ -74,6 +74,11 @@ type HostAttributeConfig struct {
 	InternalHostPattern string `mapstructure:"internal_host_pattern"`
 	regexPattern        *regexp.Regexp
 	regexCompileErr     error
+}
+
+type LogDebugInfoConfig struct {
+	Enabled        bool     `mapstructure:"enabled"`
+	RoutesToIgnore []string `mapstructure:"routes_to_ignore"`
 }
 
 func (c *HostAttributeConfig) compileRegex() error {
