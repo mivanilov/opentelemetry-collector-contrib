@@ -640,7 +640,7 @@ func logSpansVisual(serviceSpanGroups *serviceTraceSpansGrouped) {
 		spansVisual += curLine + "\n"
 	}
 	fmt.Print(spansVisual)
-	fmt.Print(dashes)
+	fmt.Println(dashes)
 }
 
 func spanStr(span ptrace.Span, spanDurationFraction float64) string {
@@ -663,7 +663,7 @@ func spanStr(span ptrace.Span, spanDurationFraction float64) string {
 }
 
 func logSpanGroups(serviceSpanGroups *serviceTraceSpansGrouped) {
-	fmt.Print("\nService Trace span groups: \n")
+	fmt.Print("Service Trace span groups: \n")
 	fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, StartTime=%s, EndTime=%s, Attributes=%v \n",
 		serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(), serviceSpanGroups.serverSpan.StartTimestamp().String(), serviceSpanGroups.serverSpan.EndTimestamp().String(), serviceSpanGroups.serverSpan.Attributes().AsRaw())
 	for i, otherSpansGroup := range serviceSpanGroups.otherSpanGroups {
@@ -694,7 +694,7 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 			float64(serviceTraceSpanGroups.serverSpan.EndTimestamp()-serviceTraceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			hasExternalSpansWithError)
-		logSpansVisual(serviceTraceSpanGroups)
+		//logSpansVisual(serviceTraceSpanGroups) FIXME malfunctioning
 		logSpanGroups(serviceTraceSpanGroups)
 		fmt.Println("!!!!!!! End: calculated internal metrics debug info !!!!!!!")
 		fmt.Println()
