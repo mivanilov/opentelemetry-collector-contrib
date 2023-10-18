@@ -429,7 +429,7 @@ func (p *connectorImp) getServerSpanDetailsByServiceTrace(traces ptrace.Traces) 
 			internalDurationTotal:     internalDurationTotal,
 		}
 
-		p.logDiagnostics(serviceTraceSpanGroups, internalDurationTotal, serviceTraceKey, hasExternalSpansWithError)
+		p.logDiagnostics(serviceTraceKey, serviceTraceSpanGroups, internalDurationTotal, hasExternalSpansWithError, traces)
 	}
 
 	return serverSpanDetailsByServiceTrace
@@ -577,7 +577,12 @@ func (p *connectorImp) addOtherSpansByServiceTrace(traces ptrace.Traces, ungroup
 }
 
 func getServiceTraceKey(serviceName pcommon.Value, traceId pcommon.TraceID) string {
-	return serviceName.Str() + traceId.String()
+	return serviceName.Str() + "|" + traceId.String()
+}
+
+func splitServiceTraceKey(serviceTraceKey string) (string, string) {
+	split := strings.Split(serviceTraceKey, "|")
+	return split[0], split[1]
 }
 
 func (p *connectorImp) calcInternalDuration(span ptrace.Span, externalSpans []ptrace.Span, internalDuration customDuration) customDuration {
@@ -694,20 +699,62 @@ func spanStr(span ptrace.Span, spanDurationFraction float64) string {
 	return output + " "
 }
 
-func logSpanGroups(serviceSpanGroups *serviceTraceSpansGrouped) {
-	fmt.Print("Service Trace span groups: \n")
-	fmt.Printf("Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, StartTime=%s, EndTime=%s, Attributes=%v \n",
-		serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(), serviceSpanGroups.serverSpan.StartTimestamp().String(), serviceSpanGroups.serverSpan.EndTimestamp().String(), serviceSpanGroups.serverSpan.Attributes().AsRaw())
+func (p *connectorImp) logSpanGroups(serviceSpanGroups *serviceTraceSpansGrouped) {
+	unitDivider := unitDivider(p.config.Histogram.Unit)
+	fmt.Print("Service Trace Span groups: \n")
+	fmt.Printf("  - Server Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+		serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(),
+		float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+		serviceSpanGroups.serverSpan.StartTimestamp().String(), serviceSpanGroups.serverSpan.EndTimestamp().String(), serviceSpanGroups.serverSpan.Attributes().AsRaw())
 	for i, otherSpansGroup := range serviceSpanGroups.otherSpanGroups {
-		fmt.Printf("Other Spans Group %d: \n", i)
+		fmt.Printf("  - Other Spans Group %d: \n", i)
 		for _, otherSpans := range otherSpansGroup {
-			fmt.Printf("Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, StartTime=%s, EndTime=%s, Attributes=%v \n",
-				otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.StartTimestamp().String(), otherSpans.EndTimestamp().String(), otherSpans.Attributes().AsRaw())
+			fmt.Printf("    - Other Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+				otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(),
+				float64(otherSpans.EndTimestamp()-otherSpans.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+				otherSpans.StartTimestamp().String(), otherSpans.EndTimestamp().String(), otherSpans.Attributes().AsRaw())
 		}
 	}
 }
 
-func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansGrouped, internalDurationTotal float64, serviceTraceKey string, hasExternalSpansWithError bool) {
+func (p *connectorImp) logServiceTraceSpans(serviceTraceKey string, traces ptrace.Traces) {
+	serviceName, traceId := splitServiceTraceKey(serviceTraceKey)
+	var serviceTraceSpans []ptrace.Span
+
+	for i := 0; i < traces.ResourceSpans().Len(); i++ {
+		rspans := traces.ResourceSpans().At(i)
+		serviceAttr, serviceAttrOk := rspans.Resource().Attributes().Get(conventions.AttributeServiceName)
+		if !serviceAttrOk || serviceAttr.Str() != serviceName {
+			continue
+		}
+
+		ilsSlice := rspans.ScopeSpans()
+		for j := 0; j < ilsSlice.Len(); j++ {
+			spans := ilsSlice.At(j).Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				if span.TraceID().String() == traceId {
+					serviceTraceSpans = append(serviceTraceSpans, span)
+				}
+			}
+		}
+	}
+
+	sort.Slice(serviceTraceSpans, func(i, j int) bool {
+		return serviceTraceSpans[i].StartTimestamp() < serviceTraceSpans[j].StartTimestamp()
+	})
+
+	unitDivider := unitDivider(p.config.Histogram.Unit)
+	fmt.Print("Service Trace all Spans: \n")
+	for _, span := range serviceTraceSpans {
+		fmt.Printf("  - Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+			span.Kind(), span.TraceID(), span.SpanID(), span.ParentSpanID(),
+			float64(span.EndTimestamp()-span.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+			span.StartTimestamp().String(), span.EndTimestamp().String(), span.Attributes().AsRaw())
+	}
+}
+
+func (p *connectorImp) logDiagnostics(serviceTraceKey string, serviceTraceSpanGroups *serviceTraceSpansGrouped, internalDurationTotal float64, hasExternalSpansWithError bool, traces ptrace.Traces) {
 	serverSpanDurationTotal := float64(serviceTraceSpanGroups.serverSpan.EndTimestamp() - serviceTraceSpanGroups.serverSpan.StartTimestamp())
 	if internalDurationTotal == 0 {
 		internalDurationTotal = serverSpanDurationTotal
@@ -716,18 +763,18 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 	if p.config.ExternalStatsExclusion.LogDebugInfo.Enabled && !p.skipLogDebugInfo(serviceTraceSpanGroups.serverSpan) {
 		url := getSpanAttribute(serviceTraceSpanGroups.serverSpan, "http.url")
 		unitDivider := unitDivider(p.config.Histogram.Unit)
-		fmt.Println("\n!!!!!!! Begin: calculated internal metrics debug info !!!!!!!")
-		fmt.Printf("ServiceTraceKey=%s httpRoute=%s otherSpanGroupsCount=%d, server span details: \n"+
-			"Total duration: %f %s \n"+
-			"Internal duration: %f %s \n"+
-			"Has external spans with error: %t \n",
-			serviceTraceKey, url, len(serviceTraceSpanGroups.otherSpanGroups),
-			float64(serviceTraceSpanGroups.serverSpan.EndTimestamp()-serviceTraceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
-			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
-			hasExternalSpansWithError)
+		fmt.Println("\n!!!!!!! Start Debug Info !!!!!!!")
+		fmt.Printf("ServiceTraceKey=%s, httpRoute=%s \n"+
+			"Server Span details: \n"+
+			"  - Total duration: %f %s \n"+
+			"  - Internal duration: %f %s \n"+
+			"  - Has external spans with error: %t \n",
+			serviceTraceKey, url, float64(serviceTraceSpanGroups.serverSpan.EndTimestamp()-serviceTraceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
+			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(), hasExternalSpansWithError)
 		//logSpansVisual(serviceTraceSpanGroups) FIXME - malfunctioning, causing OOM errors
-		logSpanGroups(serviceTraceSpanGroups)
-		fmt.Println("!!!!!!! End: calculated internal metrics debug info !!!!!!!")
+		p.logSpanGroups(serviceTraceSpanGroups)
+		p.logServiceTraceSpans(serviceTraceKey, traces)
+		fmt.Println("!!!!!!! End Debug Info !!!!!!!")
 		fmt.Println()
 	}
 
@@ -740,7 +787,7 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			serverSpanDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String())
 		if !p.config.ExternalStatsExclusion.LogDebugInfo.Enabled {
-			logSpanGroups(serviceTraceSpanGroups)
+			p.logSpanGroups(serviceTraceSpanGroups)
 		}
 		fmt.Println("!!!!!!! End: calculated internal duration > server span duration !!!!!!!")
 		fmt.Println()
