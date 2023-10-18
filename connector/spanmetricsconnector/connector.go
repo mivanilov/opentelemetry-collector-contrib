@@ -415,42 +415,58 @@ func (p *connectorImp) getServerSpanDetailsByServiceTrace(traces ptrace.Traces) 
 	var serverSpanDetailsByServiceTrace = make(map[string]*serviceTraceServerSpanDetails)
 
 	for serviceTraceKey, serviceTraceSpanGroups := range p.getGroupedSpansByServiceTrace(p.getUngroupedSpansByServiceTrace(traces)) {
-		var hasExternalSpansWithError = false
 		var internalDuration = customDuration{
 			startTimestamp: 0,
 			endTimestamp:   0,
 		}
+		var internalDurationTotal = float64(0)
+		var hasExternalSpansWithError = false
 
-		for _, spansGroup := range serviceTraceSpanGroups.otherSpanGroups {
-			var externalSpans []ptrace.Span
-
-			for _, span := range spansGroup {
-				if p.config.ExternalStatsExclusion.HostAttribute.SpanIsExternal(span) {
-					if span.Status().Code() == ptrace.StatusCodeError {
-						hasExternalSpansWithError = true
-					}
-					externalSpans = append(externalSpans, span)
-				} else {
-					internalDuration = p.calcInternalDuration(span, externalSpans, internalDuration)
-				}
-			}
-		}
-
-		var internalDurationTotal = float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
-		serverSpanDurationTotal := float64(serviceTraceSpanGroups.serverSpan.EndTimestamp() - serviceTraceSpanGroups.serverSpan.StartTimestamp())
-		if internalDurationTotal > serverSpanDurationTotal || internalDurationTotal == 0 {
-			internalDurationTotal = serverSpanDurationTotal
-		}
+		hasExternalSpansWithError, internalDurationTotal = p.calcInternalServerSpanDetails(serviceTraceSpanGroups, hasExternalSpansWithError, internalDuration)
 
 		serverSpanDetailsByServiceTrace[serviceTraceKey] = &serviceTraceServerSpanDetails{
 			hasExternalSpansWithError: hasExternalSpansWithError,
 			internalDurationTotal:     internalDurationTotal,
 		}
 
-		p.logDiagnostics(serviceTraceSpanGroups, internalDuration, serviceTraceKey, hasExternalSpansWithError)
+		p.logDiagnostics(serviceTraceSpanGroups, internalDurationTotal, serviceTraceKey, hasExternalSpansWithError)
 	}
 
 	return serverSpanDetailsByServiceTrace
+}
+
+func (p *connectorImp) calcInternalServerSpanDetails(serviceTraceSpanGroups *serviceTraceSpansGrouped, hasExternalSpansWithError bool, internalDuration customDuration) (bool, float64) {
+	var externalSpansTotal []ptrace.Span
+
+	for _, spansGroup := range serviceTraceSpanGroups.otherSpanGroups {
+		var externalSpans []ptrace.Span
+
+		for _, span := range spansGroup {
+			if p.config.ExternalStatsExclusion.HostAttribute.SpanIsExternal(span) {
+				if span.Status().Code() == ptrace.StatusCodeError {
+					hasExternalSpansWithError = true
+				}
+				externalSpans = append(externalSpans, span)
+				externalSpansTotal = append(externalSpansTotal, span)
+			} else {
+				internalDuration = p.calcInternalDuration(span, externalSpans, internalDuration)
+			}
+		}
+	}
+
+	var internalDurationTotal = float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
+
+	// in case the service trace consists only out of external client spans
+	if internalDurationTotal == 0 && len(externalSpansTotal) != 0 {
+		internalDurationTotal = p.calcInternalDurationHavingExternalSpansOnly(serviceTraceSpanGroups.serverSpan, externalSpansTotal)
+	}
+
+	serverSpanDurationTotal := float64(serviceTraceSpanGroups.serverSpan.EndTimestamp() - serviceTraceSpanGroups.serverSpan.StartTimestamp())
+	if internalDurationTotal > serverSpanDurationTotal || internalDurationTotal == 0 {
+		internalDurationTotal = serverSpanDurationTotal
+	}
+
+	return hasExternalSpansWithError, internalDurationTotal
 }
 
 func (p *connectorImp) getGroupedSpansByServiceTrace(ungroupedSpansByServiceTrace map[string]*serviceTraceSpansUngrouped) map[string]*serviceTraceSpansGrouped {
@@ -591,6 +607,22 @@ func (p *connectorImp) calcInternalDuration(span ptrace.Span, externalSpans []pt
 	return internalDuration
 }
 
+func (p *connectorImp) calcInternalDurationHavingExternalSpansOnly(serverSpan ptrace.Span, externalSpansTotal []ptrace.Span) float64 {
+	externalIoStartTimestamp := externalSpansTotal[0].StartTimestamp()
+	externalIoEndTimestamp := externalSpansTotal[0].EndTimestamp()
+
+	for _, externalSpan := range externalSpansTotal {
+		if externalIoStartTimestamp > externalSpan.StartTimestamp() {
+			externalIoStartTimestamp = externalSpan.StartTimestamp()
+		}
+		if externalIoEndTimestamp < externalSpan.EndTimestamp() {
+			externalIoEndTimestamp = externalSpan.EndTimestamp()
+		}
+	}
+
+	return float64(serverSpan.EndTimestamp()-serverSpan.StartTimestamp()) - float64(externalIoEndTimestamp-externalIoStartTimestamp)
+}
+
 func getSpanDuration(span ptrace.Span) float64 {
 	return float64(span.EndTimestamp() - span.StartTimestamp())
 }
@@ -675,8 +707,7 @@ func logSpanGroups(serviceSpanGroups *serviceTraceSpansGrouped) {
 	}
 }
 
-func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansGrouped, internalDuration customDuration, serviceTraceKey string, hasExternalSpansWithError bool) {
-	internalDurationTotal := float64(internalDuration.endTimestamp - internalDuration.startTimestamp)
+func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansGrouped, internalDurationTotal float64, serviceTraceKey string, hasExternalSpansWithError bool) {
 	serverSpanDurationTotal := float64(serviceTraceSpanGroups.serverSpan.EndTimestamp() - serviceTraceSpanGroups.serverSpan.StartTimestamp())
 	if internalDurationTotal == 0 {
 		internalDurationTotal = serverSpanDurationTotal
@@ -694,7 +725,7 @@ func (p *connectorImp) logDiagnostics(serviceTraceSpanGroups *serviceTraceSpansG
 			float64(serviceTraceSpanGroups.serverSpan.EndTimestamp()-serviceTraceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 			internalDurationTotal/float64(unitDivider), p.config.Histogram.Unit.String(),
 			hasExternalSpansWithError)
-		//logSpansVisual(serviceTraceSpanGroups) FIXME malfunctioning
+		//logSpansVisual(serviceTraceSpanGroups) FIXME - malfunctioning, causing OOM errors
 		logSpanGroups(serviceTraceSpanGroups)
 		fmt.Println("!!!!!!! End: calculated internal metrics debug info !!!!!!!")
 		fmt.Println()

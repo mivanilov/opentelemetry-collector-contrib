@@ -492,7 +492,7 @@ func buildSampleTrace() ptrace.Traces {
 	return traces
 }
 
-// buildSampleTraceWithExternalCall builds the following trace:
+// buildSampleTraceWithExternalCalls builds the following trace:
 //
 // service-a perspective:
 // - internal: database, component.internal.io
@@ -514,8 +514,8 @@ func buildSampleTrace() ptrace.Traces {
 //		    |---------> service-a|/external-3|Client -> external
 //		                  service-a|database-3|Client -> internal
 //
-// duration of external Client spans is excluded to produce metrics that measure only internal duration (Internal spans and internal Client spans like database or other internal remote) per service.
-func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.StatusCode) ptrace.Traces {
+// duration of external Client spans is excluded to produce metrics that measure only internal duration (Internal spans and internal Client spans like database or other internal remote) per service trace.
+func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.StatusCode) ptrace.Traces {
 	traces := ptrace.NewTraces()
 
 	now := time.Now()
@@ -663,6 +663,123 @@ func buildSampleTraceWithExternalCall(serviceSpansStatus map[string]ptrace.Statu
 					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x29},
 					startTime:    now.Add(time.Duration(8000) * time.Millisecond),
 					endTime:      now.Add(time.Duration(10000) * time.Millisecond),
+				},
+			},
+		}, traces.ResourceSpans().AppendEmpty())
+	initServiceSpans(serviceSpans{}, traces.ResourceSpans().AppendEmpty())
+	return traces
+}
+
+// buildSampleTraceWithExternalCallsOnly builds the following trace:
+//
+// service-a perspective:
+// - internal: none
+// - external: service-b.external.com, service-c.internal.com
+//
+//		service-a|/ping|Server ->
+//		  service-a|internal|Internal -> internal
+//		    |
+//		    |-> service-a|/external-1|Client -> external
+//		    |     service-a|/external-int-1|Client -> external
+//	        |
+//		    |-> service-a|/external-2|Client -> external
+//		    |     service-a|/external-int-2|Client -> external
+//		    |
+//		    |---------> service-a|/external-3|Client -> external
+//
+// duration of external Client spans is excluded to produce metrics that measure only internal duration (Internal spans and internal Client spans like database or other internal remote) per service trace.
+func buildSampleTraceWithExternalCallsOnly(serviceSpansStatus map[string]ptrace.StatusCode) ptrace.Traces {
+	traces := ptrace.NewTraces()
+
+	now := time.Now()
+
+	initServiceSpans(
+		serviceSpans{
+			serviceName: "service-a",
+			spans: []span{
+				{
+					name:       "/ping",
+					kind:       ptrace.SpanKindServer,
+					statusCode: serviceSpansStatus["service-a"+ptrace.SpanKindServer.String()],
+					traceID:    [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+					startTime:  now,
+					endTime:    now.Add(time.Duration(7000) * time.Millisecond),
+				},
+				{
+					name:         "internal",
+					kind:         ptrace.SpanKindInternal,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindInternal.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					startTime:    now,
+					endTime:      now.Add(time.Duration(7000) * time.Millisecond),
+				},
+				{
+					name:         "/external-1",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x20},
+					startTime:    now.Add(time.Duration(500) * time.Millisecond),
+					endTime:      now.Add(time.Duration(1000) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-b.external.com",
+					},
+				},
+				{
+					name:         "/external-int-1",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x21},
+					startTime:    now.Add(time.Duration(1000) * time.Millisecond),
+					endTime:      now.Add(time.Duration(4000) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-c.internal.com",
+					},
+				},
+				{
+					name:         "/external-2",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x22},
+					startTime:    now.Add(time.Duration(3010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(4010) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-b.external.com",
+					},
+				},
+				{
+					name:         "/external-int-2",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x23},
+					startTime:    now.Add(time.Duration(4010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(5010) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-c.internal.com",
+					},
+				},
+				{
+					name:         "/external-3",
+					kind:         ptrace.SpanKindClient,
+					statusCode:   serviceSpansStatus["service-a"+ptrace.SpanKindClient.String()],
+					traceID:      [16]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x10},
+					parentSpanID: [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x19},
+					spanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x24},
+					startTime:    now.Add(time.Duration(5010) * time.Millisecond),
+					endTime:      now.Add(time.Duration(7000) * time.Millisecond),
+					attributes: map[string]string{
+						"net.peer.name": "service-b.external.com",
+					},
 				},
 			},
 		}, traces.ResourceSpans().AppendEmpty())
@@ -1183,7 +1300,7 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
 				"service-aServer":   ptrace.StatusCodeOk,
 				"service-aInternal": ptrace.StatusCodeOk,
 				"service-aClient":   ptrace.StatusCodeOk,
@@ -1204,12 +1321,38 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			},
 		},
 		{
+			name:                   "Test single consumption (Cumulative), all spans ok, having external only.",
+			aggregationTemporality: cumulative,
+			histogramConfig:        explicitHistogramsConfig,
+			exemplarConfig:         disabledExemplarsConfig,
+			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCallsOnly(map[string]ptrace.StatusCode{
+				"service-aServer":   ptrace.StatusCodeOk,
+				"service-aInternal": ptrace.StatusCodeOk,
+				"service-aClient":   ptrace.StatusCodeOk,
+			})},
+			expectations: &expectations{
+				totalDataPointsCount: 2,
+				serviceMetricsCount:  1,
+				serviceExpectations: map[string]serviceExpectation{
+					"service-a": {
+						metricDataPointsCount: 1,
+					},
+				},
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-a|/ping|SPAN_KIND_SERVER": {
+						expectedDuration: float64(500),
+					},
+				},
+			},
+		},
+		{
 			name:                   "Test single consumption (Cumulative), Server span ok and Client spans error.",
 			aggregationTemporality: cumulative,
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
 				"service-aServer":   ptrace.StatusCodeOk,
 				"service-aInternal": ptrace.StatusCodeOk,
 				"service-aClient":   ptrace.StatusCodeError,
@@ -1235,7 +1378,7 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCall(map[string]ptrace.StatusCode{
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
 				"service-aServer":   ptrace.StatusCodeError,
 				"service-aInternal": ptrace.StatusCodeError,
 				"service-aClient":   ptrace.StatusCodeError,
@@ -1266,7 +1409,7 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 
 			externalStatsExclusionConfig := &ExternalStatsExclusionConfig{
 				LogDebugInfo: &LogDebugInfoConfig{
-					Enabled:        false,
+					Enabled:        true,
 					RoutesToIgnore: []string{},
 				},
 				HostAttribute: &HostAttributeConfig{
