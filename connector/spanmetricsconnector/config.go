@@ -65,8 +65,9 @@ type Config struct {
 }
 
 type ExternalStatsExclusionConfig struct {
-	HostAttribute *HostAttributeConfig `mapstructure:"host_attribute"`
-	LogDebugInfo  *LogDebugInfoConfig  `mapstructure:"log_debug_info"`
+	HostAttribute   *HostAttributeConfig   `mapstructure:"host_attribute"`
+	StatusAttribute *StatusAttributeConfig `mapstructure:"status_attribute"`
+	LogDebugInfo    *LogDebugInfoConfig    `mapstructure:"log_debug_info"`
 }
 
 type HostAttributeConfig struct {
@@ -74,6 +75,10 @@ type HostAttributeConfig struct {
 	InternalHostPattern string `mapstructure:"internal_host_pattern"`
 	regexPattern        *regexp.Regexp
 	regexCompileErr     error
+}
+
+type StatusAttributeConfig struct {
+	AttributeName string `mapstructure:"attribute_name"`
 }
 
 type LogDebugInfoConfig struct {

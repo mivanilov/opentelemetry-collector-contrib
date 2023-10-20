@@ -380,8 +380,7 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
 				serviceReqTraceKey := getServiceReqTraceKey(serviceAttr, span.TraceID(), span.SpanID())
-				if span.Kind() != ptrace.SpanKindServer ||
-					(span.Kind() == ptrace.SpanKindServer && span.Status().Code() == ptrace.StatusCodeError && serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].hasExternalSpansWithError) {
+				if span.Kind() != ptrace.SpanKindServer {
 					continue
 				}
 				duration := serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].internalDurationTotal / float64(unitDivider)
@@ -390,6 +389,9 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 				if !ok {
 					attributes = p.buildAttributes(serviceName, span, resourceAttr)
 					p.metricKeyToDimensions.Add(key, attributes)
+				}
+				if span.Status().Code() == ptrace.StatusCodeError && serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].hasExternalSpansWithError {
+					attributes.Remove(p.config.ExternalStatsExclusion.StatusAttribute.AttributeName)
 				}
 				if !p.config.Histogram.Disable {
 					// aggregate histogram metrics
@@ -415,14 +417,10 @@ func (p *connectorImp) getServerSpanDetailsByServiceReqTrace(traces ptrace.Trace
 	var serverSpanDetailsByServiceReqTrace = make(map[string]*serviceReqTraceServerSpanDetails)
 
 	for serviceReqTraceKey, serviceReqTraceSpanGroups := range p.getGroupedSpansByServiceReqTrace(p.getUngroupedSpansByServiceReqTrace(traces)) {
-		var internalDuration = customDuration{
-			startTimestamp: 0,
-			endTimestamp:   0,
-		}
-		var internalDurationTotal = float64(0)
-		var hasExternalSpansWithError = false
+		var internalDurationTotal float64
+		var hasExternalSpansWithError bool
 
-		hasExternalSpansWithError, internalDurationTotal = p.calcInternalServerSpanDetails(serviceReqTraceSpanGroups, hasExternalSpansWithError, internalDuration)
+		hasExternalSpansWithError, internalDurationTotal = p.calcInternalServerSpanDetails(serviceReqTraceSpanGroups)
 
 		serverSpanDetailsByServiceReqTrace[serviceReqTraceKey] = &serviceReqTraceServerSpanDetails{
 			hasExternalSpansWithError: hasExternalSpansWithError,
@@ -435,8 +433,13 @@ func (p *connectorImp) getServerSpanDetailsByServiceReqTrace(traces ptrace.Trace
 	return serverSpanDetailsByServiceReqTrace
 }
 
-func (p *connectorImp) calcInternalServerSpanDetails(serviceReqTraceSpanGroups *serviceReqTraceSpansGrouped, hasExternalSpansWithError bool, internalDuration customDuration) (bool, float64) {
+func (p *connectorImp) calcInternalServerSpanDetails(serviceReqTraceSpanGroups *serviceReqTraceSpansGrouped) (bool, float64) {
 	var externalSpansTotal []ptrace.Span
+	var internalDuration = customDuration{
+		startTimestamp: 0,
+		endTimestamp:   0,
+	}
+	var hasExternalSpansWithError bool
 
 	for _, spansGroup := range serviceReqTraceSpanGroups.otherSpanGroups {
 		var externalSpans []ptrace.Span

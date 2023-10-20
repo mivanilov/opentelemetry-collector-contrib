@@ -1384,11 +1384,16 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 				"service-aClient":   ptrace.StatusCodeError,
 			})},
 			expectations: &expectations{
-				totalDataPointsCount: 0,
+				totalDataPointsCount: 2,
 				serviceMetricsCount:  1,
 				serviceExpectations: map[string]serviceExpectation{
 					"service-a": {
-						metricDataPointsCount: 0,
+						metricDataPointsCount: 1,
+					},
+				},
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-a|/ping|SPAN_KIND_SERVER": {
+						expectedDuration: float64(7000),
 					},
 				},
 			},
@@ -1408,13 +1413,16 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			ticker := mockClock.NewTicker(time.Nanosecond)
 
 			externalStatsExclusionConfig := &ExternalStatsExclusionConfig{
-				LogDebugInfo: &LogDebugInfoConfig{
-					Enabled:        true,
-					RoutesToIgnore: []string{},
-				},
 				HostAttribute: &HostAttributeConfig{
 					AttributeName:       "net.peer.name",
 					InternalHostPattern: ".*internal.io",
+				},
+				StatusAttribute: &StatusAttributeConfig{
+					AttributeName: "http.status_code",
+				},
+				LogDebugInfo: &LogDebugInfoConfig{
+					Enabled:        true,
+					RoutesToIgnore: []string{},
 				},
 			}
 
