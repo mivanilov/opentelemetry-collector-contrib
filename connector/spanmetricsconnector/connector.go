@@ -392,6 +392,7 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 				}
 				if span.Status().Code() == ptrace.StatusCodeError && serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].hasExternalSpansWithError {
 					attributes.Remove(p.config.ExternalStatsExclusion.StatusAttribute.AttributeName)
+					fmt.Printf("Metric attributes=%v", attributes.AsRaw())
 				}
 				if !p.config.Histogram.Disable {
 					// aggregate histogram metrics
@@ -705,15 +706,15 @@ func spanStr(span ptrace.Span, spanDurationFraction float64) string {
 func (p *connectorImp) logSpanGroups(serviceSpanGroups *serviceReqTraceSpansGrouped) {
 	unitDivider := unitDivider(p.config.Histogram.Unit)
 	fmt.Print("Service request trace span groups: \n")
-	fmt.Printf("  - Server span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
-		serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(),
+	fmt.Printf("  - Server span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Status=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+		serviceSpanGroups.serverSpan.Kind(), serviceSpanGroups.serverSpan.TraceID(), serviceSpanGroups.serverSpan.SpanID(), serviceSpanGroups.serverSpan.ParentSpanID(), serviceSpanGroups.serverSpan.Status().Code().String(),
 		float64(serviceSpanGroups.serverSpan.EndTimestamp()-serviceSpanGroups.serverSpan.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 		serviceSpanGroups.serverSpan.StartTimestamp().String(), serviceSpanGroups.serverSpan.EndTimestamp().String(), serviceSpanGroups.serverSpan.Attributes().AsRaw())
 	for i, otherSpansGroup := range serviceSpanGroups.otherSpanGroups {
 		fmt.Printf("  - Other spans group %d: \n", i)
 		for _, otherSpans := range otherSpansGroup {
-			fmt.Printf("    - Other span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
-				otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(),
+			fmt.Printf("    - Other span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Status=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+				otherSpans.Kind(), otherSpans.TraceID(), otherSpans.SpanID(), otherSpans.ParentSpanID(), otherSpans.Status().Code().String(),
 				float64(otherSpans.EndTimestamp()-otherSpans.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 				otherSpans.StartTimestamp().String(), otherSpans.EndTimestamp().String(), otherSpans.Attributes().AsRaw())
 		}
@@ -750,8 +751,8 @@ func (p *connectorImp) logServiceReqTraceSpans(serviceReqTraceKey string, traces
 	unitDivider := unitDivider(p.config.Histogram.Unit)
 	fmt.Print("Service request trace all spans: \n")
 	for _, span := range serviceReqTraceSpans {
-		fmt.Printf("  - Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
-			span.Kind(), span.TraceID(), span.SpanID(), span.ParentSpanID(),
+		fmt.Printf("  - Span: SpanKind=%s, TraceID=%s, SpanID=%s, ParentSpanID=%s, Status=%s, Duration=%f %s, StartTime=%s, EndTime=%s, Attributes=%v \n",
+			span.Kind(), span.TraceID(), span.SpanID(), span.ParentSpanID(), span.Status().Code().String(),
 			float64(span.EndTimestamp()-span.StartTimestamp())/float64(unitDivider), p.config.Histogram.Unit.String(),
 			span.StartTimestamp().String(), span.EndTimestamp().String(), span.Attributes().AsRaw())
 	}
