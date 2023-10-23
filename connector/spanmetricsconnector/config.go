@@ -78,7 +78,10 @@ type HostAttributeConfig struct {
 }
 
 type StatusAttributeConfig struct {
-	AttributeName string `mapstructure:"attribute_name"`
+	AttributeName      string `mapstructure:"attribute_name"`
+	ErrorStatusPattern string `mapstructure:"error_status_pattern"`
+	regexPattern       *regexp.Regexp
+	regexCompileErr    error
 }
 
 type LogDebugInfoConfig struct {
@@ -109,17 +112,49 @@ func (c *HostAttributeConfig) matchInternalHost(host string) bool {
 			return false
 		}
 	}
-
 	return c.regexPattern.MatchString(host)
 }
 
-func (c *HostAttributeConfig) SpanIsExternal(span ptrace.Span) bool {
+func (c *HostAttributeConfig) isSpanExternal(span ptrace.Span) bool {
 	hostAttr, ok := span.Attributes().Get(c.AttributeName)
 	if !ok {
 		return false
 	}
-	host := hostAttr.AsString()
-	return !c.matchInternalHost(host)
+	return !c.matchInternalHost(hostAttr.AsString())
+}
+
+func (c *StatusAttributeConfig) compileRegex() error {
+	if c.regexPattern != nil {
+		return c.regexCompileErr
+	}
+	if c.ErrorStatusPattern == "" {
+		return nil
+	}
+	regex, err := regexp.Compile(c.ErrorStatusPattern)
+	if err != nil {
+		c.regexCompileErr = fmt.Errorf("error compiling config.ExternalStatsExclusion.StatusAttributeConfig.ErrorStatusPattern regex: %w", err)
+		return c.regexCompileErr
+	}
+	c.regexPattern = regex
+	return nil
+}
+
+func (c *StatusAttributeConfig) matchErrorStatus(status string) bool {
+	if c.regexPattern == nil {
+		err := c.compileRegex()
+		if err != nil {
+			return false
+		}
+	}
+	return c.regexPattern.MatchString(status)
+}
+
+func (c *StatusAttributeConfig) isSpanStatusError(span ptrace.Span) bool {
+	statusAttr, ok := span.Attributes().Get(c.AttributeName)
+	if !ok {
+		return span.Status().Code() == ptrace.StatusCodeError
+	}
+	return span.Status().Code() == ptrace.StatusCodeError || c.matchErrorStatus(statusAttr.AsString())
 }
 
 type HistogramConfig struct {

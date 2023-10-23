@@ -390,9 +390,8 @@ func (p *connectorImp) generateServiceServerMetricsExcludingExternalStats(traces
 					attributes = p.buildAttributes(serviceName, span, resourceAttr)
 					p.metricKeyToDimensions.Add(key, attributes)
 				}
-				if span.Status().Code() == ptrace.StatusCodeError && serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].hasExternalSpansWithError {
+				if serverSpanDetailsByServiceReqTrace[serviceReqTraceKey].hasExternalSpansWithError && p.config.ExternalStatsExclusion.StatusAttribute.isSpanStatusError(span) {
 					attributes.Remove(p.config.ExternalStatsExclusion.StatusAttribute.AttributeName)
-					fmt.Printf("Metric attributes=%v", attributes.AsRaw())
 				}
 				if !p.config.Histogram.Disable {
 					// aggregate histogram metrics
@@ -446,8 +445,8 @@ func (p *connectorImp) calcInternalServerSpanDetails(serviceReqTraceSpanGroups *
 		var externalSpans []ptrace.Span
 
 		for _, span := range spansGroup {
-			if p.config.ExternalStatsExclusion.HostAttribute.SpanIsExternal(span) {
-				if span.Status().Code() == ptrace.StatusCodeError {
+			if p.config.ExternalStatsExclusion.HostAttribute.isSpanExternal(span) {
+				if p.config.ExternalStatsExclusion.StatusAttribute.isSpanStatusError(span) {
 					hasExternalSpansWithError = true
 				}
 				externalSpans = append(externalSpans, span)

@@ -515,7 +515,7 @@ func buildSampleTrace() ptrace.Traces {
 //		                  service-a|database-3|Client -> internal
 //
 // duration of external Client spans is excluded to produce metrics that measure only internal duration (Internal spans and internal Client spans like database or other internal remote) per service trace.
-func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.StatusCode) ptrace.Traces {
+func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.StatusCode, spanStatus string) ptrace.Traces {
 	traces := ptrace.NewTraces()
 
 	now := time.Now()
@@ -532,6 +532,9 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					spanID:     [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
 					startTime:  now,
 					endTime:    now.Add(time.Duration(10000) * time.Millisecond),
+					attributes: map[string]string{
+						"http.status_code": spanStatus,
+					},
 				},
 				{
 					name:         "internal",
@@ -553,7 +556,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now,
 					endTime:      now.Add(time.Duration(1000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-b.external.com",
+						"net.peer.name":    "service-b.external.com",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -576,7 +580,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now.Add(time.Duration(4000) * time.Millisecond),
 					endTime:      now.Add(time.Duration(5000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-c.internal.com",
+						"net.peer.name":    "service-c.internal.com",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -589,7 +594,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now.Add(time.Duration(5000) * time.Millisecond),
 					endTime:      now.Add(time.Duration(6000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "component.internal.io",
+						"net.peer.name":    "component.internal.io",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -602,7 +608,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now,
 					endTime:      now.Add(time.Duration(3010) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "component.internal.io",
+						"net.peer.name":    "component.internal.io",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -615,7 +622,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now.Add(time.Duration(3010) * time.Millisecond),
 					endTime:      now.Add(time.Duration(4010) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-b.external.com",
+						"net.peer.name":    "service-b.external.com",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -628,7 +636,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now.Add(time.Duration(4010) * time.Millisecond),
 					endTime:      now.Add(time.Duration(5010) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-c.internal.com",
+						"net.peer.name":    "service-c.internal.com",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -651,7 +660,8 @@ func buildSampleTraceWithExternalCalls(serviceSpansStatus map[string]ptrace.Stat
 					startTime:    now.Add(time.Duration(7000) * time.Millisecond),
 					endTime:      now.Add(time.Duration(8000) * time.Millisecond),
 					attributes: map[string]string{
-						"net.peer.name": "service-b.external.com",
+						"net.peer.name":    "service-b.external.com",
+						"http.status_code": spanStatus,
 					},
 				},
 				{
@@ -1300,11 +1310,14 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
-				"service-aServer":   ptrace.StatusCodeOk,
-				"service-aInternal": ptrace.StatusCodeOk,
-				"service-aClient":   ptrace.StatusCodeOk,
-			})},
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(
+				map[string]ptrace.StatusCode{
+					"service-aServer":   ptrace.StatusCodeOk,
+					"service-aInternal": ptrace.StatusCodeOk,
+					"service-aClient":   ptrace.StatusCodeOk,
+				},
+				"200"),
+			},
 			expectations: &expectations{
 				totalDataPointsCount: 2,
 				serviceMetricsCount:  1,
@@ -1326,11 +1339,13 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCallsOnly(map[string]ptrace.StatusCode{
-				"service-aServer":   ptrace.StatusCodeOk,
-				"service-aInternal": ptrace.StatusCodeOk,
-				"service-aClient":   ptrace.StatusCodeOk,
-			})},
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCallsOnly(
+				map[string]ptrace.StatusCode{
+					"service-aServer":   ptrace.StatusCodeOk,
+					"service-aInternal": ptrace.StatusCodeOk,
+					"service-aClient":   ptrace.StatusCodeOk,
+				}),
+			},
 			expectations: &expectations{
 				totalDataPointsCount: 2,
 				serviceMetricsCount:  1,
@@ -1352,11 +1367,14 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
-				"service-aServer":   ptrace.StatusCodeOk,
-				"service-aInternal": ptrace.StatusCodeOk,
-				"service-aClient":   ptrace.StatusCodeError,
-			})},
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(
+				map[string]ptrace.StatusCode{
+					"service-aServer":   ptrace.StatusCodeOk,
+					"service-aInternal": ptrace.StatusCodeOk,
+					"service-aClient":   ptrace.StatusCodeError,
+				},
+				"200"),
+			},
 			expectations: &expectations{
 				totalDataPointsCount: 2,
 				serviceMetricsCount:  1,
@@ -1378,11 +1396,43 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 			histogramConfig:        explicitHistogramsConfig,
 			exemplarConfig:         disabledExemplarsConfig,
 			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
-			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(map[string]ptrace.StatusCode{
-				"service-aServer":   ptrace.StatusCodeError,
-				"service-aInternal": ptrace.StatusCodeError,
-				"service-aClient":   ptrace.StatusCodeError,
-			})},
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(
+				map[string]ptrace.StatusCode{
+					"service-aServer":   ptrace.StatusCodeError,
+					"service-aInternal": ptrace.StatusCodeError,
+					"service-aClient":   ptrace.StatusCodeError,
+				},
+				"200"),
+			},
+			expectations: &expectations{
+				totalDataPointsCount: 2,
+				serviceMetricsCount:  1,
+				serviceExpectations: map[string]serviceExpectation{
+					"service-a": {
+						metricDataPointsCount: 1,
+					},
+				},
+				serviceSpanExpectations: map[string]serviceSpanExpectation{
+					"service-a|/ping|SPAN_KIND_SERVER": {
+						expectedDuration: float64(7000),
+					},
+				},
+			},
+		},
+		{
+			name:                   "Test single consumption (Cumulative), all spans unset and status attr 400.",
+			aggregationTemporality: cumulative,
+			histogramConfig:        explicitHistogramsConfig,
+			exemplarConfig:         disabledExemplarsConfig,
+			verifier:               verifyConsumeMetricsInputCumulativeExcludingExternalStats,
+			traces: []ptrace.Traces{buildSampleTraceWithExternalCalls(
+				map[string]ptrace.StatusCode{
+					"service-aServer":   ptrace.StatusCodeUnset,
+					"service-aInternal": ptrace.StatusCodeUnset,
+					"service-aClient":   ptrace.StatusCodeUnset,
+				},
+				"400"),
+			},
 			expectations: &expectations{
 				totalDataPointsCount: 2,
 				serviceMetricsCount:  1,
@@ -1418,7 +1468,8 @@ func TestConsumeTracesExcludingExternalStats(t *testing.T) {
 					InternalHostPattern: ".*internal.io",
 				},
 				StatusAttribute: &StatusAttributeConfig{
-					AttributeName: "http.status_code",
+					AttributeName:      "http.status_code",
+					ErrorStatusPattern: "4..|5..",
 				},
 				LogDebugInfo: &LogDebugInfoConfig{
 					Enabled:        true,
